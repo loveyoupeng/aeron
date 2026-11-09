@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@
  */
 package io.aeron.logbuffer;
 
-import org.agrona.UnsafeAccess;
 import org.agrona.concurrent.UnsafeBuffer;
 
+import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 
 import static java.lang.Integer.reverseBytes;
@@ -35,11 +35,11 @@ import static io.aeron.protocol.HeaderFlyweight.VERSION_FIELD_OFFSET;
  */
 public class HeaderWriter
 {
-    protected final long versionFlagsType;
-    protected final long sessionId;
-    protected final long streamId;
+    final long versionFlagsType;
+    final long sessionId;
+    final long streamId;
 
-    protected HeaderWriter(final long versionFlagsType, final long sessionId, final long streamId)
+    HeaderWriter(final long versionFlagsType, final long sessionId, final long streamId)
     {
         this.versionFlagsType = versionFlagsType;
         this.sessionId = sessionId;
@@ -53,6 +53,12 @@ public class HeaderWriter
         streamId = defaultHeader.getInt(STREAM_ID_FIELD_OFFSET) & 0xFFFF_FFFFL;
     }
 
+    /**
+     * Create a new {@link HeaderWriter} that is {@link ByteOrder} specific to the platform.
+     *
+     * @param defaultHeader for the stream.
+     * @return a new {@link HeaderWriter} that is {@link ByteOrder} specific to the platform.
+     */
     public static HeaderWriter newInstance(final UnsafeBuffer defaultHeader)
     {
         if (ByteOrder.nativeOrder() == ByteOrder.LITTLE_ENDIAN)
@@ -75,15 +81,15 @@ public class HeaderWriter
      */
     public void write(final UnsafeBuffer termBuffer, final int offset, final int length, final int termId)
     {
-        termBuffer.putLongOrdered(offset + FRAME_LENGTH_FIELD_OFFSET, versionFlagsType | ((-length) & 0xFFFF_FFFFL));
-        UnsafeAccess.UNSAFE.storeFence();
+        termBuffer.putLongRelease(offset + FRAME_LENGTH_FIELD_OFFSET, versionFlagsType | ((-length) & 0xFFFF_FFFFL));
+        VarHandle.storeStoreFence();
 
         termBuffer.putLong(offset + TERM_OFFSET_FIELD_OFFSET, sessionId | offset);
-        termBuffer.putLong(offset + STREAM_ID_FIELD_OFFSET, streamId | (((long)termId) << 32));
+        termBuffer.putLong(offset + STREAM_ID_FIELD_OFFSET, (((long)termId) << 32) | streamId);
     }
 }
 
-class NativeBigEndianHeaderWriter extends HeaderWriter
+final class NativeBigEndianHeaderWriter extends HeaderWriter
 {
     NativeBigEndianHeaderWriter(final UnsafeBuffer defaultHeader)
     {
@@ -95,11 +101,11 @@ class NativeBigEndianHeaderWriter extends HeaderWriter
 
     public void write(final UnsafeBuffer termBuffer, final int offset, final int length, final int termId)
     {
-        termBuffer.putLongOrdered(
-            offset + FRAME_LENGTH_FIELD_OFFSET, versionFlagsType | ((((long)reverseBytes(-length))) << 32));
-        UnsafeAccess.UNSAFE.storeFence();
+        termBuffer.putLongRelease(
+            offset + FRAME_LENGTH_FIELD_OFFSET, ((((long)reverseBytes(-length))) << 32) | versionFlagsType);
+        VarHandle.storeStoreFence();
 
-        termBuffer.putLong(offset + TERM_OFFSET_FIELD_OFFSET, sessionId | ((((long)reverseBytes(offset))) << 32));
+        termBuffer.putLong(offset + TERM_OFFSET_FIELD_OFFSET, ((((long)reverseBytes(offset))) << 32) | sessionId);
         termBuffer.putLong(offset + STREAM_ID_FIELD_OFFSET, streamId | (reverseBytes(termId) & 0xFFFF_FFFFL));
     }
 }

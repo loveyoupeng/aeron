@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,10 @@ import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.samples.SampleConfiguration;
 import org.agrona.BufferUtil;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.util.concurrent.TimeUnit;
@@ -45,26 +47,34 @@ public class RecordedBasicPublisher
 
     private static final UnsafeBuffer BUFFER = new UnsafeBuffer(BufferUtil.allocateDirectAligned(256, 64));
 
-    public static void main(final String[] args) throws Exception
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws InterruptedException if the thread sleep delay is interrupted.
+     */
+    @SuppressWarnings("try")
+    public static void main(final String[] args) throws InterruptedException
     {
         System.out.println("Publishing to " + CHANNEL + " on stream id " + STREAM_ID);
-
-        final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
 
         // Create a unique response stream id so not to clash with other archive clients.
         final AeronArchive.Context archiveCtx = new AeronArchive.Context()
             .controlResponseStreamId(AeronArchive.Configuration.controlResponseStreamId() + 1);
 
-        try (AeronArchive archive = AeronArchive.connect(archiveCtx))
+        final AtomicBoolean running = new AtomicBoolean(true);
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false));
+            AeronArchive archive = AeronArchive.connect(archiveCtx))
         {
             archive.startRecording(CHANNEL, STREAM_ID, SourceLocation.LOCAL);
 
             try (Publication publication = archive.context().aeron().addPublication(CHANNEL, STREAM_ID))
             {
+                final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
                 // Wait for recording to have started before publishing.
                 final CountersReader counters = archive.context().aeron().countersReader();
-                int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId());
+                final long archiveId = archive.archiveId();
+                int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId(), archiveId);
                 while (CountersReader.NULL_COUNTER_ID == counterId)
                 {
                     if (!running.get())
@@ -72,14 +82,14 @@ public class RecordedBasicPublisher
                         return;
                     }
 
-                    Thread.yield();
-                    counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId());
+                    idleStrategy.idle();
+                    counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId(), archiveId);
                 }
 
                 final long recordingId = RecordingPos.getRecordingId(counters, counterId);
                 System.out.println("Recording started: recordingId = " + recordingId);
 
-                for (int i = 0; i < NUMBER_OF_MESSAGES && running.get(); i++)
+                for (long i = 0; i < NUMBER_OF_MESSAGES && running.get(); i++)
                 {
                     final String message = "Hello World! " + i;
                     final byte[] messageBytes = message.getBytes();
@@ -87,8 +97,8 @@ public class RecordedBasicPublisher
 
                     System.out.print("Offering " + i + "/" + NUMBER_OF_MESSAGES + " - ");
 
-                    final long result = publication.offer(BUFFER, 0, messageBytes.length);
-                    checkResult(result);
+                    final long position = publication.offer(BUFFER, 0, messageBytes.length);
+                    checkResult(position);
 
                     final String errorMessage = archive.pollForErrorResponse();
                     if (null != errorMessage)
@@ -99,6 +109,7 @@ public class RecordedBasicPublisher
                     Thread.sleep(TimeUnit.SECONDS.toMillis(1));
                 }
 
+                idleStrategy.reset();
                 while (counters.getCounterValue(counterId) < publication.position())
                 {
                     if (!RecordingPos.isActive(counters, counterId, recordingId))
@@ -106,7 +117,7 @@ public class RecordedBasicPublisher
                         throw new IllegalStateException("recording has stopped unexpectedly: " + recordingId);
                     }
 
-                    Thread.yield();
+                    idleStrategy.idle();
                 }
             }
             finally
@@ -117,35 +128,35 @@ public class RecordedBasicPublisher
         }
     }
 
-    private static void checkResult(final long result)
+    private static void checkResult(final long position)
     {
-        if (result > 0)
+        if (position > 0)
         {
             System.out.println("yay!");
         }
-        else if (result == Publication.BACK_PRESSURED)
+        else if (position == Publication.BACK_PRESSURED)
         {
             System.out.println("Offer failed due to back pressure");
         }
-        else if (result == Publication.ADMIN_ACTION)
+        else if (position == Publication.ADMIN_ACTION)
         {
             System.out.println("Offer failed because of an administration action in the system");
         }
-        else if (result == Publication.NOT_CONNECTED)
+        else if (position == Publication.NOT_CONNECTED)
         {
             System.out.println("Offer failed because publisher is not connected to subscriber");
         }
-        else if (result == Publication.CLOSED)
+        else if (position == Publication.CLOSED)
         {
             System.out.println("Offer failed publication is closed");
         }
-        else if (result == Publication.MAX_POSITION_EXCEEDED)
+        else if (position == Publication.MAX_POSITION_EXCEEDED)
         {
             throw new IllegalStateException("Offer failed due to publication reaching max position");
         }
         else
         {
-            System.out.println("Offer failed due to unknown result code: " + result);
+            System.out.println("Offer failed due to unknown result code: " + position);
         }
     }
 }

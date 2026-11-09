@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import org.agrona.ExpandableArrayBuffer;
+import org.agrona.LangUtil;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
@@ -35,21 +36,32 @@ import java.io.File;
 import static io.aeron.Aeron.NULL_VALUE;
 import static io.aeron.archive.Archive.Configuration.ARCHIVE_DIR_DEFAULT;
 
+/**
+ * Command line utility for creating a new Archive for migration testing and replay.
+ * <p>
+ * Creates 2 recordings, one starts at position 0 and the other starts in the second term.
+ */
 public class ArchiveCreator
 {
     private static final String MESSAGE_PREFIX = "Message-Prefix-";
-    private static final int MAX_CATALOG_ENTRIES = 128;
+    private static final long CATALOG_CAPACITY = 128 * 1024;
     private static final int TERM_LENGTH = LogBufferDescriptor.TERM_MIN_LENGTH;
     private static final int SEGMENT_LENGTH = TERM_LENGTH * 2;
     private static final int STREAM_ID = 33;
 
     private static int recordingNumber = 0;
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         final String archiveDirName = Archive.Configuration.archiveDirName();
-        final File archiveDir = ARCHIVE_DIR_DEFAULT.equals(archiveDirName) ?
-            new File("archive") : new File(archiveDirName);
+        final File archiveDir =
+            ARCHIVE_DIR_DEFAULT.equals(archiveDirName) ? new File("archive") : new File(archiveDirName);
 
         final MediaDriver.Context driverContext = new MediaDriver.Context()
             .publicationTermBufferLength(TERM_LENGTH)
@@ -60,7 +72,7 @@ public class ArchiveCreator
             .dirDeleteOnStart(true);
 
         final Archive.Context archiveContext = new Archive.Context()
-            .maxCatalogEntries(MAX_CATALOG_ENTRIES)
+            .catalogCapacity(CATALOG_CAPACITY)
             .segmentFileLength(SEGMENT_LENGTH)
             .deleteArchiveOnStart(true)
             .archiveDir(archiveDir)
@@ -69,7 +81,7 @@ public class ArchiveCreator
 
         System.out.println("Creating basic archive at " + archiveContext.archiveDir());
 
-        try (ArchivingMediaDriver archivingDriver = ArchivingMediaDriver.launch(driverContext, archiveContext);
+        try (ArchivingMediaDriver ignore = ArchivingMediaDriver.launch(driverContext, archiveContext);
             Aeron aeron = Aeron.connect();
             AeronArchive aeronArchive = AeronArchive.connect(new AeronArchive.Context().aeron(aeron)))
         {
@@ -96,7 +108,7 @@ public class ArchiveCreator
         final Aeron aeron, final AeronArchive aeronArchive, final long startPosition, final long targetPosition)
     {
         final int initialTermId = 7;
-        final int portNumber = 3333 + recordingNumber++;
+        recordingNumber++;
         final ChannelUriStringBuilder uriBuilder = new ChannelUriStringBuilder()
             .media("udp")
             .endpoint("localhost:" + recordingNumber)
@@ -110,7 +122,7 @@ public class ArchiveCreator
         try (Publication publication = aeronArchive.addRecordedExclusivePublication(uriBuilder.build(), STREAM_ID))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId = awaitRecordingCounterId(counters, publication.sessionId(), aeronArchive.archiveId());
             final long recordingId = RecordingPos.getRecordingId(counters, counterId);
 
             System.out.println(
@@ -118,45 +130,45 @@ public class ArchiveCreator
                 " position " + publication.position() +
                 " to " + targetPosition);
 
-            offerToPosition(publication, MESSAGE_PREFIX, targetPosition);
+            offerToPosition(publication, targetPosition);
             awaitPosition(counters, counterId, publication.position());
 
             aeronArchive.stopRecording(publication);
         }
     }
 
-    private static void checkInterruptedStatus()
+    private static void checkInterruptStatus()
     {
-        if (Thread.currentThread().isInterrupted())
+        if (Thread.interrupted())
         {
-            throw new IllegalStateException("interrupted");
+            LangUtil.rethrowUnchecked(new InterruptedException());
         }
     }
 
-    private static int awaitRecordingCounterId(final CountersReader counters, final int sessionId)
+    private static int awaitRecordingCounterId(final CountersReader counters, final int sessionId, final long archiveId)
     {
         int counterId;
-        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId)))
+        while (NULL_VALUE == (counterId = RecordingPos.findCounterIdBySession(counters, sessionId, archiveId)))
         {
-            checkInterruptedStatus();
             Thread.yield();
+            checkInterruptStatus();
         }
 
         return counterId;
     }
 
-    private static void offerToPosition(final Publication publication, final String prefix, final long minimumPosition)
+    private static void offerToPosition(final Publication publication, final long minimumPosition)
     {
         final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer();
 
         for (int i = 0; publication.position() < minimumPosition; i++)
         {
-            final int length = buffer.putStringWithoutLengthAscii(0, prefix + i);
+            final int length = buffer.putStringWithoutLengthAscii(0, MESSAGE_PREFIX + i);
 
             while (publication.offer(buffer, 0, length) <= 0)
             {
-                checkInterruptedStatus();
                 Thread.yield();
+                checkInterruptStatus();
             }
         }
     }
@@ -170,8 +182,8 @@ public class ArchiveCreator
                 throw new IllegalStateException("count not active: " + counterId);
             }
 
-            checkInterruptedStatus();
             Thread.yield();
+            checkInterruptStatus();
         }
     }
 }

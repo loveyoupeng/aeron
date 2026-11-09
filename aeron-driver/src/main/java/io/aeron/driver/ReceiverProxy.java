@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,181 +15,110 @@
  */
 package io.aeron.driver;
 
+import io.aeron.driver.logging.DriverTracing;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
-import io.aeron.driver.media.ReceiveDestinationUdpTransport;
+import io.aeron.driver.media.ReceiveDestinationTransport;
 import io.aeron.driver.media.UdpChannel;
+import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.status.AtomicCounter;
 
-import java.util.Queue;
-
-import static io.aeron.driver.ThreadingMode.INVOKER;
-import static io.aeron.driver.ThreadingMode.SHARED;
+import java.net.InetSocketAddress;
 
 /**
  * Proxy for offering into the {@link Receiver} Thread's command queue.
  */
-public class ReceiverProxy
+final class ReceiverProxy extends CommandProxy
 {
-    private final ThreadingMode threadingMode;
-    private final Queue<Runnable> commandQueue;
-    private final AtomicCounter failCount;
-
     private Receiver receiver;
 
-    public ReceiverProxy(
-        final ThreadingMode threadingMode, final Queue<Runnable> commandQueue, final AtomicCounter failCount)
+    ReceiverProxy(final OneToOneConcurrentArrayQueue<Runnable> commandQueue, final AtomicCounter failCount)
     {
-        this.threadingMode = threadingMode;
-        this.commandQueue = commandQueue;
-        this.failCount = failCount;
+        super(commandQueue, failCount);
     }
 
-    public void receiver(final Receiver receiver)
+    void receiver(final Receiver receiver)
     {
         this.receiver = receiver;
     }
 
-    public Receiver receiver()
+    Receiver receiver()
     {
         return receiver;
     }
 
-    public void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
+    void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onAddSubscription(mediaEndpoint, streamId);
-        }
-        else
-        {
-            offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId));
-        }
+        offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId));
     }
 
-    public void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId, final int sessionId)
+    void addSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId, final int sessionId)
     {
-        if (notConcurrent())
-        {
-            receiver.onAddSubscription(mediaEndpoint, streamId, sessionId);
-        }
-        else
-        {
-            offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId, sessionId));
-        }
+        offer(() -> receiver.onAddSubscription(mediaEndpoint, streamId, sessionId));
     }
 
-    public void removeSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
+    void removeSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveSubscription(mediaEndpoint, streamId);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId));
-        }
+        offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId));
     }
 
-    public void removeSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId, final int sessionId)
+    void removeSubscription(final ReceiveChannelEndpoint mediaEndpoint, final int streamId, final int sessionId)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveSubscription(mediaEndpoint, streamId, sessionId);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId, sessionId));
-        }
+        offer(() -> receiver.onRemoveSubscription(mediaEndpoint, streamId, sessionId));
     }
 
-    public void newPublicationImage(final ReceiveChannelEndpoint channelEndpoint, final PublicationImage image)
+    void newPublicationImage(final ReceiveChannelEndpoint channelEndpoint, final PublicationImage image)
     {
-        if (notConcurrent())
-        {
-            receiver.onNewPublicationImage(channelEndpoint, image);
-        }
-        else
-        {
-            offer(() -> receiver.onNewPublicationImage(channelEndpoint, image));
-        }
+        offer(() -> receiver.onNewPublicationImage(channelEndpoint, image));
     }
 
-    public void registerReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
+    void registerReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            receiver.onRegisterReceiveChannelEndpoint(channelEndpoint);
-        }
-        else
-        {
-            offer(() -> receiver.onRegisterReceiveChannelEndpoint(channelEndpoint));
-        }
+        DriverTracing.traceReceiveChannelCreation(channelEndpoint.udpChannel().description());
+        offer(() -> receiver.onRegisterReceiveChannelEndpoint(channelEndpoint));
     }
 
-    public void closeReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
+    void closeReceiveChannelEndpoint(final ReceiveChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            receiver.onCloseReceiveChannelEndpoint(channelEndpoint);
-        }
-        else
-        {
-            offer(() -> receiver.onCloseReceiveChannelEndpoint(channelEndpoint));
-        }
+        DriverTracing.traceReceiveChannelClose(channelEndpoint.udpChannel().description());
+        offer(() -> receiver.onCloseReceiveChannelEndpoint(channelEndpoint));
     }
 
-    public void removeCoolDown(final ReceiveChannelEndpoint channelEndpoint, final int sessionId, final int streamId)
+    void removeCoolDown(final ReceiveChannelEndpoint channelEndpoint, final int sessionId, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveCoolDown(channelEndpoint, sessionId, streamId);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveCoolDown(channelEndpoint, sessionId, streamId));
-        }
+        offer(() -> receiver.onRemoveCoolDown(channelEndpoint, sessionId, streamId));
     }
 
-    public void addDestination(
-        final ReceiveChannelEndpoint channelEndpoint, final ReceiveDestinationUdpTransport transport)
+    void removeInitInProgress(final ReceiveChannelEndpoint channelEndpoint, final int sessionId, final int streamId)
     {
-        if (notConcurrent())
-        {
-            receiver.onAddDestination(channelEndpoint, transport);
-        }
-        else
-        {
-            offer(() -> receiver.onAddDestination(channelEndpoint, transport));
-        }
+        offer(() -> receiver.onRemoveInitInProgress(channelEndpoint, sessionId, streamId));
     }
 
-    public void removeDestination(final ReceiveChannelEndpoint channelEndpoint, final UdpChannel udpChannel)
+    void addDestination(final ReceiveChannelEndpoint channelEndpoint, final ReceiveDestinationTransport transport)
     {
-        if (notConcurrent())
-        {
-            receiver.onRemoveDestination(channelEndpoint, udpChannel);
-        }
-        else
-        {
-            offer(() -> receiver.onRemoveDestination(channelEndpoint, udpChannel));
-        }
+        offer(() -> receiver.onAddDestination(channelEndpoint, transport));
     }
 
-    private boolean notConcurrent()
+    void removeDestination(final ReceiveChannelEndpoint channelEndpoint, final UdpChannel udpChannel)
     {
-        return threadingMode == SHARED || threadingMode == INVOKER;
+        offer(() -> receiver.onRemoveDestination(channelEndpoint, udpChannel));
     }
 
-    private void offer(final Runnable cmd)
+    void onResolutionChange(
+        final ReceiveChannelEndpoint channelEndpoint, final UdpChannel udpChannel, final InetSocketAddress newAddress)
     {
-        while (!commandQueue.offer(cmd))
-        {
-            if (Thread.currentThread().isInterrupted())
-            {
-                break;
-            }
-            failCount.incrementOrdered();
-            Thread.yield();
-        }
+        offer(() -> receiver.onResolutionChange(channelEndpoint, udpChannel, newAddress));
+    }
+
+    void requestSetup(
+        final ReceiveChannelEndpoint channelEndpoint,
+        final int streamId,
+        final int sessionId)
+    {
+        offer(() -> receiver.onRequestSetup(channelEndpoint, streamId, sessionId));
+    }
+
+    void rejectImage(final long imageCorrelationId, final long position, final String reason)
+    {
+        offer(() -> receiver.onRejectImage(imageCorrelationId, position, reason));
     }
 }

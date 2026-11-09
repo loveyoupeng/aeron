@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ interface NetworkInterfaceShim
 
     boolean isLoopback(NetworkInterface ifc) throws SocketException;
 
+    @SuppressWarnings("JavadocVariable")
     NetworkInterfaceShim DEFAULT = new NetworkInterfaceShim()
     {
         public Enumeration<NetworkInterface> getNetworkInterfaces() throws SocketException

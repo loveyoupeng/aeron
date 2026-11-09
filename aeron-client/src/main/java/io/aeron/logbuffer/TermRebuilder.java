@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,8 +23,12 @@ import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
  * Rebuild a term buffer from received frames which can be out-of-order. The resulting data structure will only
  * monotonically increase in state.
  */
-public class TermRebuilder
+public final class TermRebuilder
 {
+    private TermRebuilder()
+    {
+    }
+
     /**
      * Insert a packet of frames into the log at the appropriate termOffset as indicated by the term termOffset header.
      * <p>
@@ -46,7 +50,7 @@ public class TermRebuilder
             termBuffer.putLong(termOffset + 16, packet.getLong(16));
             termBuffer.putLong(termOffset + 8, packet.getLong(8));
 
-            termBuffer.putLongOrdered(termOffset, packet.getLong(0));
+            termBuffer.putLongRelease(termOffset, packet.getLong(0));
         }
     }
 }

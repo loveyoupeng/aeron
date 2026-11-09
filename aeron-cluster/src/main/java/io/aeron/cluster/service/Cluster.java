@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,8 @@ package io.aeron.cluster.service;
 
 import io.aeron.Aeron;
 import io.aeron.DirectBufferVector;
+import io.aeron.ExclusivePublication;
+import io.aeron.Image;
 import io.aeron.cluster.client.AeronCluster;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.CloseReason;
@@ -24,15 +26,28 @@ import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.status.AtomicCounter;
 
 import java.util.Collection;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * Interface for a {@link ClusteredService} to interact with cluster hosting it.
+ * <p>
+ * This object should only be used to send messages to the cluster or schedule timers in response to other messages
+ * and timers. Sending messages and timers should not happen from cluster lifecycle methods like
+ * {@link ClusteredService#onStart(Cluster, Image)}, {@link ClusteredService#onRoleChange(Cluster.Role)} or
+ * {@link ClusteredService#onTakeSnapshot(ExclusivePublication)}, or {@link ClusteredService#onTerminate(Cluster)},
+ * except the session lifecycle methods {@link ClusteredService#onSessionOpen(ClientSession, long)},
+ * {@link ClusteredService#onSessionClose(ClientSession, long, CloseReason)},
+ * and {@link ClusteredService#onNewLeadershipTermEvent(long, long, long, long, int, int, TimeUnit, int)}.
  */
-public interface Cluster extends IdleStrategy
+public interface Cluster
 {
+    /**
+     * Role of the node in the cluster.
+     */
     enum Role
     {
         /**
@@ -50,28 +65,17 @@ public interface Cluster extends IdleStrategy
          */
         LEADER(2);
 
-        static final Role[] ROLES;
-
-        static
-        {
-            final Role[] roles = values();
-            ROLES = new Role[roles.length];
-            for (final Role role : roles)
-            {
-                final int code = role.code();
-                if (null != ROLES[code])
-                {
-                    throw new ClusterException("code already in use: " + code);
-                }
-
-                ROLES[code] = role;
-            }
-        }
+        static final Role[] ROLES = values();
 
         private final int code;
 
         Role(final int code)
         {
+            if (code != ordinal())
+            {
+                throw new IllegalArgumentException(name() + " - code must equal ordinal value: code=" + code);
+            }
+
             this.code = code;
         }
 
@@ -91,14 +95,30 @@ public interface Cluster extends IdleStrategy
          * @param code for the {@link Role}.
          * @return the {@link Role} of the cluster node.
          */
-        public static Role get(final int code)
+        public static Role get(final long code)
         {
             if (code < 0 || code > (ROLES.length - 1))
             {
                 throw new IllegalStateException("Invalid role counter code: " + code);
             }
 
-            return ROLES[code];
+            return ROLES[(int)code];
+        }
+
+        /**
+         * Get the role by reading the code from a counter.
+         *
+         * @param counter containing the value of the role.
+         * @return the role for the cluster member.
+         */
+        public static Role get(final AtomicCounter counter)
+        {
+            if (counter.isClosed())
+            {
+                return FOLLOWER;
+            }
+
+            return get(counter.get());
         }
     }
 
@@ -131,7 +151,7 @@ public interface Cluster extends IdleStrategy
     Aeron aeron();
 
     /**
-     * Get the  {@link ClusteredServiceContainer.Context} under which the container is running.
+     * Get the {@link ClusteredServiceContainer.Context} under which the container is running.
      *
      * @return the {@link ClusteredServiceContainer.Context} under which the container is running.
      */
@@ -147,10 +167,20 @@ public interface Cluster extends IdleStrategy
 
     /**
      * Get the current collection of cluster client sessions.
+     * <p>
+     * The {@link java.util.Iterator} on this class does not support nested iteration. It reuses the iterator to
+     * avoid allocation.
      *
      * @return the current collection of cluster client sessions.
      */
     Collection<ClientSession> clientSessions();
+
+    /**
+     * For each iterator over {@link ClientSession}s using the most efficient method possible.
+     *
+     * @param action to be taken for each {@link ClientSession} in turn.
+     */
+    void forEachClientSession(Consumer<? super ClientSession> action);
 
     /**
      * Request the close of a {@link ClientSession} by sending the request to the consensus module.
@@ -159,7 +189,7 @@ public interface Cluster extends IdleStrategy
      * @return true if the event to close a session was sent or false if back pressure was applied.
      * @throws ClusterException if the clusterSessionId is not recognised.
      */
-    boolean closeSession(long clusterSessionId);
+    boolean closeClientSession(long clusterSessionId);
 
     /**
      * Cluster time as {@link #timeUnit()}s since 1 Jan 1970 UTC.
@@ -169,18 +199,18 @@ public interface Cluster extends IdleStrategy
     long time();
 
     /**
-     * The unit of time applied to timestamps and {@link #time()}.
+     * The unit of time applied when timestamping and {@link #time()} operations.
      *
-     * @return the unit of time applied to timestamps and {@link #time()}.
+     * @return the unit of time applied when timestamping and {@link #time()} operations.
      */
     TimeUnit timeUnit();
 
     /**
      * Schedule a timer for a given deadline and provide a correlation id to identify the timer when it expires or
-     * for cancellation. This action asynchronous and will race with the timer expiring.
+     * for cancellation. This action is asynchronous, when rescheduling it will race with the timer expiring.
      * <p>
-     * If the correlationId is for an existing scheduled timer then it will be reschedule to the new deadline. However
-     * it is best do generate correlationIds in a monotonic fashion and be aware of potential clashes with other
+     * If the correlationId is for an existing scheduled timer then it will be rescheduled to the new deadline. However,
+     * it is best to generate correlationIds in a monotonic fashion and be aware of potential clashes with other
      * services in the same cluster. Service isolation can be achieved by using the upper bits for service id.
      * <p>
      * Timers should only be scheduled or cancelled in the context of processing a
@@ -189,16 +219,34 @@ public interface Cluster extends IdleStrategy
      * {@link ClusteredService#onSessionOpen(ClientSession, long)}, or
      * {@link ClusteredService#onSessionClose(ClientSession, long, CloseReason)}.
      * If applied to other events then they are not guaranteed to be reliable.
+     * <p>
+     * Callers of this method must loop until the method succeeds.
+     *
+     * <pre>{@code
+     * private Cluster cluster;
+     * // Lines omitted...
+     *
+     * cluster.idleStrategy().reset();
+     * while (!cluster.scheduleTimer(correlationId, deadline))
+     * {
+     *     cluster.idleStrategy().idle();
+     * }
+     * }</pre>
+     * <p>
+     * The cluster's idle strategy must be used in the body of the loop to allow for the clustered service to be
+     * shutdown if required.
      *
      * @param correlationId to identify the timer when it expires. {@link Long#MAX_VALUE} not supported.
-     * @param deadline      time in after which the timer will fire. {@link Long#MAX_VALUE} not supported.
-     * @return true if the event to schedule a timer request has been sent or false if back pressure is applied.
+     * @param deadline      time after which the timer will fire. {@link Long#MAX_VALUE} not supported.
+     * @return {@code true} if the request to schedule a timer has been sent or {@code false} in case of
+     * {@link io.aeron.Publication#ADMIN_ACTION} or {@link io.aeron.Publication#BACK_PRESSURED}.
+     * @throws ClusterException if request fails with an error.
      * @see #cancelTimer(long)
      */
     boolean scheduleTimer(long correlationId, long deadline);
 
     /**
-     * Cancel a previous scheduled timer. This action asynchronous and will race with the timer expiring.
+     * Cancel a previously scheduled timer. This action is asynchronous and will race with the timer expiring.
      * <p>
      * Timers should only be scheduled or cancelled in the context of processing a
      * {@link ClusteredService#onSessionMessage(ClientSession, long, DirectBuffer, int, int, Header)},
@@ -206,17 +254,58 @@ public interface Cluster extends IdleStrategy
      * {@link ClusteredService#onSessionOpen(ClientSession, long)}, or
      * {@link ClusteredService#onSessionClose(ClientSession, long, CloseReason)}.
      * If applied to other events then they are not guaranteed to be reliable.
+     * <p>
+     * Callers of this method must loop until the method succeeds.
+     *
+     * <pre>{@code
+     * private Cluster cluster;
+     * // Lines omitted...
+     *
+     * cluster.idleStrategy().reset();
+     * while (!cluster.cancelTimer(correlationId))
+     * {
+     *     cluster.idleStrategy().idle();
+     * }
+     * }</pre>
      *
      * @param correlationId for the timer provided when it was scheduled. {@link Long#MAX_VALUE} not supported.
-     * @return true if the event to cancel request has been sent or false if back pressure is applied.
+     * @return {@code true} if the request to cancel a timer has been sent or {@code false} in case of
+     * {@link io.aeron.Publication#ADMIN_ACTION} or {@link io.aeron.Publication#BACK_PRESSURED}.
+     * @throws ClusterException if request fails with an error.
      * @see #scheduleTimer(long, long)
      */
     boolean cancelTimer(long correlationId);
 
     /**
      * Offer a message as ingress to the cluster for sequencing. This will happen efficiently over IPC to the
-     * consensus module and have the cluster session of as the negative value of the
+     * consensus module and have the cluster session of as the
      * {@link io.aeron.cluster.service.ClusteredServiceContainer.Configuration#SERVICE_ID_PROP_NAME}.
+     * <p>
+     * Callers of this method must loop until the method succeeds.
+     *
+     * <pre>{@code
+     * private Cluster cluster;
+     * // Lines omitted...
+     *
+     * cluster.idleStrategy().reset();
+     * while(true)
+     * {
+     *     final long position = cluster.offer(buffer, offset, length);
+     *     if (position > 0)
+     *     {
+     *         break;
+     *     }
+     *     else if (Publication.ADMIN_ACTION != position && Publication.BACK_PRESSURED != position)
+     *     {
+     *         throw new ClusterException("Internal offer failed: " + position);
+     *     }
+     *
+     *     cluster.idleStrategy.idle();
+     * }
+     * }</pre>
+     * <p>
+     * The cluster's idle strategy must be used in the body of the loop to allow for the clustered service to be
+     * shutdown if required.
      *
      * @param buffer containing the message to be offered.
      * @param offset in the buffer at which the encoded message begins.
@@ -228,10 +317,13 @@ public interface Cluster extends IdleStrategy
 
     /**
      * Offer a message as ingress to the cluster for sequencing. This will happen efficiently over IPC to the
-     * consensus module and have the cluster session of as the negative value of the
+     * consensus module and have the cluster session of as the
      * {@link io.aeron.cluster.service.ClusteredServiceContainer.Configuration#SERVICE_ID_PROP_NAME}.
      * <p>
      * The first vector must be left free to be filled in for the session message header.
+     * <p>
+     * Callers of this method should loop until the method succeeds, see
+     * {@link io.aeron.cluster.service.Cluster#offer(DirectBuffer, int, int)} for an example.
      *
      * @param vectors containing the message parts with the first left to be filled.
      * @return positive value if successful.
@@ -245,23 +337,35 @@ public interface Cluster extends IdleStrategy
      * <p>
      * On successful claim, the Cluster session header will be written to the start of the claimed buffer section.
      * Clients <b>MUST</b> write into the claimed buffer region at offset + {@link AeronCluster#SESSION_HEADER_LENGTH}.
-     * <pre>{@code
-     *     final DirectBuffer srcBuffer = acquireMessage();
+     * <p>
+     * Callers of this method must loop until the method succeeds.
      *
-     *     if (cluster.tryClaim(length, bufferClaim))
+     * <pre>{@code
+     * private final BufferClaim bufferClaim = new BufferClaim();
+     * private Cluster cluster;
+     * // Lines omitted...
+     *
+     * final DirectBuffer srcBuffer = acquireMessage();
+     * cluster.idleStrategy().reset();
+     * while(true)
+     * {
+     *     final long position = cluster.tryClaim(length, bufferClaim);
+     *     if (position > 0)
      *     {
-     *         try
-     *         {
-     *              final MutableDirectBuffer buffer = bufferClaim.buffer();
-     *              final int offset = bufferClaim.offset();
-     *              // ensure that data is written at the correct offset
-     *              buffer.putBytes(offset + AeronCluster.SESSION_HEADER_LENGTH, srcBuffer, 0, length);
-     *         }
-     *         finally
-     *         {
-     *             bufferClaim.commit();
-     *         }
+     *         final MutableDirectBuffer buffer = bufferClaim.buffer();
+     *         final int offset = bufferClaim.offset();
+     *         // ensure that data is written after the session header
+     *         buffer.putBytes(offset + AeronCluster.SESSION_HEADER_LENGTH, srcBuffer, 0, length);
+     *         bufferClaim.commit();
+     *         break;
      *     }
+     *     else if (Publication.ADMIN_ACTION != position && Publication.BACK_PRESSURED != position)
+     *     {
+     *         throw new ClusterException("Internal tryClaim failed: " + position);
+     *     }
+     *
+     *     cluster.idleStrategy.idle();
+     * }
      * }</pre>
      *
      * @param length      of the range to claim, in bytes.
@@ -275,21 +379,10 @@ public interface Cluster extends IdleStrategy
     long tryClaim(int length, BufferClaim bufferClaim);
 
     /**
-     * Reset idle strategy.
-     */
-    void reset();
-
-    /**
-     * Should be called by the service when it experiences back-pressure on egress, closing sessions, making
-     * timer requests, or any long running actions.
-     */
-    void idle();
-
-    /**
-     * Should be called by the service when it experiences back-pressure on egress, closing sessions, or making
-     * timer requests, or any long running actions.
+     * {@link IdleStrategy} which should be used by the service when it experiences back-pressure on egress,
+     * closing sessions, making timer requests, or any long-running actions.
      *
-     * @param workCount a value of 0 will reset the idle strategy is a progressive back-off has been applied.
+     * @return the {@link IdleStrategy} which should be used by the service when it experiences back-pressure.
      */
-    void idle(int workCount);
+    IdleStrategy idleStrategy();
 }

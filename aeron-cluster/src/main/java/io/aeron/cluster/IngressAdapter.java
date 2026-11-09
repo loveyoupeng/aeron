@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,16 +18,13 @@ package io.aeron.cluster;
 import io.aeron.ControlledFragmentAssembler;
 import io.aeron.Subscription;
 import io.aeron.cluster.client.AeronCluster;
-import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
-import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.ArrayUtil;
-import org.agrona.concurrent.status.AtomicCounter;
 
-class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
+class IngressAdapter implements AutoCloseable
 {
     private final int fragmentPollLimit;
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
@@ -36,47 +33,64 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
     private final SessionMessageHeaderDecoder sessionMessageHeaderDecoder = new SessionMessageHeaderDecoder();
     private final SessionKeepAliveDecoder sessionKeepAliveDecoder = new SessionKeepAliveDecoder();
     private final ChallengeResponseDecoder challengeResponseDecoder = new ChallengeResponseDecoder();
-    private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this);
+    private final AdminRequestDecoder adminRequestDecoder = new AdminRequestDecoder();
+    private final ControlledFragmentAssembler udpFragmentAssembler = new ControlledFragmentAssembler(this::onMessage);
+    private final ControlledFragmentAssembler ipcFragmentAssembler = new ControlledFragmentAssembler(this::onMessage);
     private final ConsensusModuleAgent consensusModuleAgent;
-    private final AtomicCounter invalidRequests;
     private Subscription subscription;
+    private Subscription ipcSubscription;
 
-    IngressAdapter(
-        final int fragmentPollLimit,
-        final ConsensusModuleAgent consensusModuleAgent,
-        final AtomicCounter invalidRequests)
+    IngressAdapter(final int fragmentPollLimit, final ConsensusModuleAgent consensusModuleAgent)
     {
         this.fragmentPollLimit = fragmentPollLimit;
         this.consensusModuleAgent = consensusModuleAgent;
-        this.invalidRequests = invalidRequests;
     }
 
     public void close()
     {
-        CloseHelper.close(subscription);
-        subscription = null;
-        fragmentAssembler.clear();
+        final Subscription subscription = this.subscription;
+        final Subscription ipcSubscription = this.ipcSubscription;
+
+        this.subscription = null;
+        this.ipcSubscription = null;
+
+        if (null != subscription)
+        {
+            subscription.close();
+        }
+
+        if (null != ipcSubscription)
+        {
+            ipcSubscription.close();
+        }
+
+        udpFragmentAssembler.clear();
+        ipcFragmentAssembler.clear();
     }
 
     @SuppressWarnings("MethodLength")
-    public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    public ControlledFragmentHandler.Action onMessage(
+        final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
         final int schemaId = messageHeaderDecoder.schemaId();
+        final int templateId = messageHeaderDecoder.templateId();
+        final int actingVersion = messageHeaderDecoder.version();
+        final int actingBlockLength = messageHeaderDecoder.blockLength();
         if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
         {
-            throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
+            return consensusModuleAgent.onExtensionMessage(
+                actingBlockLength, templateId, schemaId, actingVersion, buffer, offset, length, header);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
         if (templateId == SessionMessageHeaderDecoder.TEMPLATE_ID)
         {
             sessionMessageHeaderDecoder.wrap(
                 buffer,
                 offset + MessageHeaderDecoder.ENCODED_LENGTH,
                 messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
+                actingVersion);
 
             return consensusModuleAgent.onIngressMessage(
                 sessionMessageHeaderDecoder.leadershipTermId(),
@@ -94,11 +108,11 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 final String responseChannel = connectRequestDecoder.responseChannel();
                 final int credentialsLength = connectRequestDecoder.encodedCredentialsLength();
-                final byte[] credentials;
+                byte[] credentials = ArrayUtil.EMPTY_BYTE_ARRAY;
                 if (credentialsLength > 0)
                 {
                     credentials = new byte[credentialsLength];
@@ -106,15 +120,18 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                 }
                 else
                 {
-                    credentials = ArrayUtil.EMPTY_BYTE_ARRAY;
+                    connectRequestDecoder.skipEncodedCredentials();
                 }
+                final String clientInfo = connectRequestDecoder.clientInfo();
 
                 consensusModuleAgent.onSessionConnect(
                     connectRequestDecoder.correlationId(),
                     connectRequestDecoder.responseStreamId(),
                     connectRequestDecoder.version(),
                     responseChannel,
-                    credentials);
+                    credentials,
+                    clientInfo,
+                    header);
                 break;
             }
 
@@ -124,7 +141,7 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onSessionClose(
                     closeRequestDecoder.leadershipTermId(),
@@ -138,12 +155,12 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onSessionKeepAlive(
                     sessionKeepAliveDecoder.leadershipTermId(),
-                    sessionKeepAliveDecoder.clusterSessionId()
-                );
+                    sessionKeepAliveDecoder.clusterSessionId(),
+                    header);
                 break;
             }
 
@@ -153,42 +170,76 @@ class IngressAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 final byte[] credentials = new byte[challengeResponseDecoder.encodedCredentialsLength()];
                 challengeResponseDecoder.getEncodedCredentials(credentials, 0, credentials.length);
 
-                consensusModuleAgent.onChallengeResponse(
+                consensusModuleAgent.onIngressChallengeResponse(
                     challengeResponseDecoder.correlationId(),
                     challengeResponseDecoder.clusterSessionId(),
                     credentials);
                 break;
             }
 
-            default:
-                invalidRequests.incrementOrdered();
+            case AdminRequestDecoder.TEMPLATE_ID:
+            {
+                adminRequestDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    actingVersion);
+
+                final int payloadOffset = adminRequestDecoder.offset() +
+                    adminRequestDecoder.encodedLength() +
+                    AdminRequestDecoder.payloadHeaderLength();
+                consensusModuleAgent.onAdminRequest(
+                    adminRequestDecoder.leadershipTermId(),
+                    adminRequestDecoder.clusterSessionId(),
+                    adminRequestDecoder.correlationId(),
+                    adminRequestDecoder.requestType(),
+                    buffer,
+                    payloadOffset,
+                    adminRequestDecoder.payloadLength());
+                break;
+            }
         }
 
-        return Action.CONTINUE;
+        return ControlledFragmentHandler.Action.CONTINUE;
     }
 
-    void connect(final Subscription subscription)
+    void connect(final Subscription subscription, final Subscription ipcSubscription)
     {
         this.subscription = subscription;
+        this.ipcSubscription = ipcSubscription;
     }
 
     int poll()
     {
+        int fragmentsRead = 0;
+
         if (null != subscription)
         {
-            return subscription.controlledPoll(fragmentAssembler, fragmentPollLimit);
+            fragmentsRead += subscription.controlledPoll(udpFragmentAssembler, fragmentPollLimit);
         }
 
-        return 0;
+        if (null != ipcSubscription)
+        {
+            fragmentsRead += ipcSubscription.controlledPoll(ipcFragmentAssembler, fragmentPollLimit);
+        }
+
+        return fragmentsRead;
     }
 
-    void freeSessionBuffer(final int imageSessionId)
+    void freeSessionBuffer(final int imageSessionId, final boolean isIpc)
     {
-        fragmentAssembler.freeSessionBuffer(imageSessionId);
+        if (isIpc)
+        {
+            ipcFragmentAssembler.freeSessionBuffer(imageSessionId);
+        }
+        else
+        {
+            udpFragmentAssembler.freeSessionBuffer(imageSessionId);
+        }
     }
 }

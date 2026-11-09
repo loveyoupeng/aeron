@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,15 +30,21 @@ import static org.agrona.BitUtil.align;
  */
 public final class TermScanner
 {
+    private TermScanner()
+    {
+    }
+
     /**
      * Scan the term buffer for availability of new message fragments from a given offset up to a maxLength of bytes.
      *
      * @param termBuffer to be scanned for new message fragments.
      * @param offset     at which the scan should begin.
      * @param maxLength  in bytes of how much should be scanned.
-     * @return resulting status of the scan which packs the available bytes and padding into a long.
+     * @return resulting status of the scan which packs the available bytes and padding into a long. The available bytes
+     * can be negative which indicates that there was data to send.
      */
-    public static long scanForAvailability(final UnsafeBuffer termBuffer, final int offset, final int maxLength)
+    public static long scanForAvailability(
+        final UnsafeBuffer termBuffer, final int offset, final int maxLength)
     {
         final int limit = Math.min(maxLength, termBuffer.capacity() - offset);
         int available = 0;
@@ -64,7 +70,7 @@ public final class TermScanner
 
             if (available > limit)
             {
-                available -= alignedFrameLength;
+                available = alignedFrameLength == available ? -available : available - alignedFrameLength;
                 padding = 0;
                 break;
             }

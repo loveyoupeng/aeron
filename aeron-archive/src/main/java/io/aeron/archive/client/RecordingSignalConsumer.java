@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,9 +27,9 @@ public interface RecordingSignalConsumer
      * Signal of operation taken on a recording.
      *
      * @param controlSessionId that initiated the operation.
-     * @param correlationId    that initiated the operation would could be the replication id.
+     * @param correlationId    that initiated the operation, could be the replication id.
      * @param recordingId      which has signalled.
-     * @param subscriptionId   of the Subscription associated with the recording.
+     * @param subscriptionId   of the {@link io.aeron.Subscription} associated with the recording.
      * @param position         of the recorded stream at the point of signal.
      * @param signal           type of the operation applied to the recording.
      */

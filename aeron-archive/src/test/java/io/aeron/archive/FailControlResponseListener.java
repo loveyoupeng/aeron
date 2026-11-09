@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,13 @@
  */
 package io.aeron.archive;
 
+import io.aeron.Aeron;
 import io.aeron.archive.client.ControlResponseListener;
 import io.aeron.archive.codecs.ControlResponseCode;
 
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.fail;
 
-public class FailControlResponseListener implements ControlResponseListener
+class FailControlResponseListener implements ControlResponseListener
 {
     public void onResponse(
         final long controlSessionId,
@@ -29,7 +30,11 @@ public class FailControlResponseListener implements ControlResponseListener
         final ControlResponseCode code,
         final String errorMessage)
     {
-        fail();
+        if (Aeron.NULL_VALUE != correlationId)
+        {
+            fail("controlSessionId=" + controlSessionId + ", correlationId=" + correlationId + ", relevantId=" +
+                relevantId + ", responseCode=" + code + ", errorMessage=" + errorMessage);
+        }
     }
 
     public void onRecordingDescriptor(
@@ -50,6 +55,21 @@ public class FailControlResponseListener implements ControlResponseListener
         final String originalChannel,
         final String sourceIdentity)
     {
-        fail();
+        fail("controlSessionId=" + controlSessionId +
+            ", correlationId=" + correlationId +
+            ", recordingId=" + recordingId +
+            ", startTimestamp=" + startTimestamp +
+            ", stopTimestamp=" + stopTimestamp +
+            ", startPosition=" + startPosition +
+            ", stopPosition=" + stopPosition +
+            ", initialTermId=" + initialTermId +
+            ", segmentFileLength=" + segmentFileLength +
+            ", termBufferLength=" + termBufferLength +
+            ", mtuLength=" + mtuLength +
+            ", sessionId=" + sessionId +
+            ", streamId=" + streamId +
+            ", strippedChannel=" + strippedChannel +
+            ", originalChannel=" + originalChannel +
+            ", sourceIdentity=" + sourceIdentity);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,16 +15,18 @@
  */
 package io.aeron.cluster;
 
+import io.aeron.cluster.client.ClusterEvent;
+import io.aeron.exceptions.AeronException;
+import org.agrona.ErrorHandler;
+
 class ClusterTermination
 {
-    private final MemberStatusPublisher memberStatusPublisher;
     private long deadlineNs;
-    private boolean hasServiceTerminated = false;
+    private boolean isAwaitingServices = true;
 
-    ClusterTermination(final MemberStatusPublisher memberStatusPublisher, final long deadlineNs)
+    ClusterTermination(final long deadlineNs)
     {
         this.deadlineNs = deadlineNs;
-        this.memberStatusPublisher = memberStatusPublisher;
     }
 
     void deadlineNs(final long deadlineNs)
@@ -32,49 +34,52 @@ class ClusterTermination
         this.deadlineNs = deadlineNs;
     }
 
-    boolean canTerminate(final ClusterMember[] members, final long terminationPosition, final long nowNs)
+    boolean canTerminate(final ClusterMember[] members, final long nowNs)
     {
-        if (hasServiceTerminated)
+        if (isAwaitingServices)
         {
-            return haveFollowersTerminated(members, terminationPosition) || nowNs >= deadlineNs;
+            return false;
         }
 
-        return false;
-    }
-
-    void hasServiceTerminated(final boolean hasServiceTerminated)
-    {
-        this.hasServiceTerminated = hasServiceTerminated;
-    }
-
-    void terminationPosition(final ClusterMember[] members, final ClusterMember thisMember, final long position)
-    {
-        for (final ClusterMember member : members)
-        {
-            member.hasSentTerminationAck(false);
-
-            if (member != thisMember)
-            {
-                memberStatusPublisher.terminationPosition(member.publication(), position);
-            }
-        }
-    }
-
-    private static boolean haveFollowersTerminated(final ClusterMember[] members, final long terminationPosition)
-    {
         boolean result = true;
 
-        for (int i = 0, length = members.length; i < length; i++)
+        for (final ClusterMember member : members)
         {
-            final ClusterMember member = members[i];
-
-            if (!member.hasSentTerminationAck() && member.logPosition() < terminationPosition)
+            if (!member.isLeader() && !member.hasTerminated())
             {
                 result = false;
                 break;
             }
         }
 
-        return result;
+        return result || nowNs >= deadlineNs;
+    }
+
+    void onServicesTerminated()
+    {
+        isAwaitingServices = false;
+    }
+
+    void terminationPosition(
+        final ErrorHandler errorHandler,
+        final ConsensusPublisher consensusPublisher,
+        final ClusterMember[] members,
+        final ClusterMember thisMember,
+        final long leadershipTermId,
+        final long position)
+    {
+        for (final ClusterMember member : members)
+        {
+            member.hasTerminated(false);
+
+            if (member != thisMember)
+            {
+                if (!consensusPublisher.terminationPosition(member.publication(), leadershipTermId, position))
+                {
+                    errorHandler.onError(new ClusterEvent(
+                        "failed to send termination position to member=" + member.id(), AeronException.Category.WARN));
+                }
+            }
+        }
     }
 }

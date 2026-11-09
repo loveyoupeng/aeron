@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@ import org.agrona.concurrent.UnsafeBuffer;
  * <b>Note:</b> This class is NOT threadsafe for updating {@link #clusterSessionId(long)} or
  * {@link #leadershipTermId(long)}. Each publisher thread requires its own instance.
  */
-public class IngressSessionDecorator
+public final class IngressSessionDecorator
 {
     /**
      * Length of the session header that will be prepended to the message.
@@ -93,7 +93,7 @@ public class IngressSessionDecorator
      * <p>
      * This version of the method will set the timestamp value in the header to {@link Aeron#NULL_VALUE}.
      *
-     * @param publication to be offer to.
+     * @param publication to be offered to.
      * @param buffer      containing message.
      * @param offset      offset in the buffer at which the encoded message begins.
      * @param length      in bytes of the encoded message.

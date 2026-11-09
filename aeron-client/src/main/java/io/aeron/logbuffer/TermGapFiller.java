@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +24,12 @@ import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_PAD;
 /**
  * Fills a gap in a term with a padding record.
  */
-public class TermGapFiller
+public final class TermGapFiller
 {
+    private TermGapFiller()
+    {
+    }
+
     /**
      * Try to gap fill the current term at a given offset if the gap contains no data.
      * <p>

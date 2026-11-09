@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ import static java.nio.ByteOrder.LITTLE_ENDIAN;
  * linked via the correlation id. Messages are encoded in {@link java.nio.ByteOrder#LITTLE_ENDIAN}.
  * <p>
  * The chunk size if best determined by {@link io.aeron.Publication#maxPayloadLength()} minus header for the chunk.
- *
+ * <p>
  * <b>file-create</b>
  * <pre>
  *   0                   1                   2                   3
@@ -85,7 +85,13 @@ public class FileSender
     private static final int STREAM_ID = SampleConfiguration.STREAM_ID;
     private static final String CHANNEL = SampleConfiguration.CHANNEL;
 
-    public static void main(final String[] args) throws Exception
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws InterruptedException if the thread is interrupted when sleeping.
+     */
+    public static void main(final String[] args) throws InterruptedException
     {
         if (args.length != 1)
         {
@@ -122,10 +128,10 @@ public class FileSender
 
         final int msgLength = FILE_NAME_OFFSET + buffer.putStringUtf8(FILE_NAME_OFFSET, filename);
 
-        long result;
-        while ((result = publication.offer(buffer, 0, msgLength)) < 0)
+        long position;
+        while ((position = publication.offer(buffer, 0, msgLength)) < 0)
         {
-            checkResult(result);
+            checkResult(position);
             Thread.yield();
         }
     }
@@ -153,10 +159,10 @@ public class FileSender
         final int chunkOffset,
         final int chunkLength)
     {
-        long result;
-        while ((result = publication.tryClaim(CHUNK_PAYLOAD_OFFSET + chunkLength, bufferClaim)) < 0)
+        long position;
+        while ((position = publication.tryClaim(CHUNK_PAYLOAD_OFFSET + chunkLength, bufferClaim)) < 0)
         {
-            checkResult(result);
+            checkResult(position);
             Thread.yield();
         }
 
@@ -173,19 +179,19 @@ public class FileSender
         bufferClaim.commit();
     }
 
-    private static void checkResult(final long result)
+    private static void checkResult(final long position)
     {
-        if (result == Publication.CLOSED)
+        if (position == Publication.CLOSED)
         {
             throw new IllegalStateException("Connection has been closed");
         }
 
-        if (result == Publication.NOT_CONNECTED)
+        if (position == Publication.NOT_CONNECTED)
         {
             throw new IllegalStateException("Connection is no longer available");
         }
 
-        if (result == Publication.MAX_POSITION_EXCEEDED)
+        if (position == Publication.MAX_POSITION_EXCEEDED)
         {
             throw new IllegalStateException("Publication failed due to max position being reached");
         }

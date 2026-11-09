@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,24 +17,67 @@ package io.aeron.exceptions;
 
 import io.aeron.ErrorCode;
 
+/**
+ * Indicates an invalid use of the control protocol when sending commands from the client to driver.
+ */
 public class ControlProtocolException extends AeronException
 {
+    private static final long serialVersionUID = -6491010363479568113L;
+
+    /**
+     * The {@link ErrorCode} indicating more specific issue experienced by the media driver.
+     */
     private final ErrorCode code;
 
+    /**
+     * Construct an exception to indicate an invalid command has been sent to the media driver.
+     *
+     * @param code for the type of error.
+     * @param msg  providing more detail.
+     */
     public ControlProtocolException(final ErrorCode code, final String msg)
     {
-        super(msg);
+        super(msg, errorToCategory(code));
         this.code = code;
     }
 
+    /**
+     * Construct an exception to indicate an invalid command has been sent to the media driver.
+     *
+     * @param code      for the type of error.
+     * @param rootCause of the error.
+     */
     public ControlProtocolException(final ErrorCode code, final Exception rootCause)
     {
-        super(rootCause);
+        super(rootCause, errorToCategory(code));
         this.code = code;
     }
 
+    /**
+     * Construct an exception to indicate an invalid command has been sent to the media driver.
+     *
+     * @param code      for the type of error.
+     * @param msg       providing more detail.
+     * @param rootCause of the error.
+     */
+    public ControlProtocolException(final ErrorCode code, final String msg, final Exception rootCause)
+    {
+        super(msg, rootCause, errorToCategory(code));
+        this.code = code;
+    }
+
+    /**
+     * The {@link ErrorCode} indicating more specific issue experienced by the media driver.
+     *
+     * @return {@link ErrorCode} indicating more specific issue experienced by the media driver.
+     */
     public ErrorCode errorCode()
     {
         return code;
+    }
+
+    static Category errorToCategory(final ErrorCode errorCode)
+    {
+        return ErrorCode.RESOURCE_TEMPORARILY_UNAVAILABLE == errorCode ? Category.WARN : Category.ERROR;
     }
 }

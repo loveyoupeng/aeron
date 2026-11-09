@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,12 @@ import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 /**
  * Utility functions for reading a term within a log buffer.
  */
-public class TermReader
+public final class TermReader
 {
+    private TermReader()
+    {
+    }
+
     /**
      * Reads data from a term in a log buffer and updates a passed {@link Position} so progress is not lost in the
      * event of an exception.
@@ -71,23 +75,22 @@ public class TermReader
 
                 if (!isPaddingFrame(termBuffer, frameOffset))
                 {
+                    ++fragmentsRead;
                     header.offset(frameOffset);
                     handler.onFragment(termBuffer, frameOffset + HEADER_LENGTH, frameLength - HEADER_LENGTH, header);
-
-                    ++fragmentsRead;
                 }
             }
         }
-        catch (final Throwable t)
+        catch (final Exception ex)
         {
-            errorHandler.onError(t);
+            errorHandler.onError(ex);
         }
         finally
         {
             final long newPosition = currentPosition + (offset - termOffset);
             if (newPosition > currentPosition)
             {
-                subscriberPosition.setOrdered(newPosition);
+                subscriberPosition.setRelease(newPosition);
             }
         }
 
@@ -133,16 +136,15 @@ public class TermReader
 
                 if (!isPaddingFrame(termBuffer, frameOffset))
                 {
+                    ++fragmentsRead;
                     header.offset(frameOffset);
                     handler.onFragment(termBuffer, frameOffset + HEADER_LENGTH, frameLength - HEADER_LENGTH, header);
-
-                    ++fragmentsRead;
                 }
             }
         }
-        catch (final Throwable t)
+        catch (final Exception ex)
         {
-            errorHandler.onError(t);
+            errorHandler.onError(ex);
         }
 
         return pack(offset, fragmentsRead);

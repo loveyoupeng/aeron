@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import org.agrona.DirectBuffer;
 /**
  * Encapsulate the polling, decoding, and dispatching of recording events.
  */
-public class RecordingEventsAdapter implements FragmentHandler
+public final class RecordingEventsAdapter implements FragmentHandler
 {
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final RecordingStartedDecoder recordingStartedDecoder = new RecordingStartedDecoder();
@@ -63,6 +63,10 @@ public class RecordingEventsAdapter implements FragmentHandler
         return subscription.poll(this, fragmentLimit);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
@@ -73,8 +77,7 @@ public class RecordingEventsAdapter implements FragmentHandler
             throw new ArchiveException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
-        switch (templateId)
+        switch (messageHeaderDecoder.templateId())
         {
             case RecordingStartedDecoder.TEMPLATE_ID:
                 recordingStartedDecoder.wrap(

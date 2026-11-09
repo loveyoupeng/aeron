@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,19 +18,44 @@ package io.aeron.security;
 import org.agrona.collections.ArrayUtil;
 
 /**
- * Default Authenticator that authenticates all connection requests immediately.
+ * Default Authenticator which authenticates all connection requests immediately.
  */
 public class DefaultAuthenticatorSupplier implements AuthenticatorSupplier
 {
-    public static final byte[] NULL_ENCODED_PRINCIPAL = ArrayUtil.EMPTY_BYTE_ARRAY;
-    public static final DefaultAuthenticator DEFAULT_AUTHENTICATOR = new DefaultAuthenticator();
+    /**
+     * Singleton instance.
+     */
+    public static final DefaultAuthenticatorSupplier INSTANCE = new DefaultAuthenticatorSupplier();
 
+    /**
+     * The null encoded principal is an empty array of bytes.
+     */
+    public static final byte[] NULL_ENCODED_PRINCIPAL = ArrayUtil.EMPTY_BYTE_ARRAY;
+
+    /**
+     * Singleton instance which can be used to avoid allocation.
+     */
+    public static final Authenticator DEFAULT_AUTHENTICATOR = new DefaultAuthenticator();
+
+    /**
+     * Default constructor.
+     */
+    public DefaultAuthenticatorSupplier()
+    {
+    }
+
+    /**
+     * Gets the singleton instance {@link #DEFAULT_AUTHENTICATOR} which authenticates all connection requests
+     * immediately.
+     *
+     * @return {@link #DEFAULT_AUTHENTICATOR} which authenticates all connection requests immediately.
+     */
     public Authenticator get()
     {
         return DEFAULT_AUTHENTICATOR;
     }
 
-    static class DefaultAuthenticator implements Authenticator
+    static final class DefaultAuthenticator implements Authenticator
     {
         public void onConnectRequest(final long sessionId, final byte[] encodedCredentials, final long nowMs)
         {

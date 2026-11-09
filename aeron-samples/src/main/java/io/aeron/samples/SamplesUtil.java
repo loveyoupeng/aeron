@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,29 +16,28 @@
 package io.aeron.samples;
 
 import io.aeron.CommonContext;
+import io.aeron.FragmentAssembler;
 import io.aeron.Image;
 import io.aeron.Subscription;
+import io.aeron.archive.client.AeronArchive;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.protocol.HeaderFlyweight;
 import org.agrona.DirectBuffer;
-import org.agrona.LangUtil;
+import org.agrona.IoUtil;
 import org.agrona.collections.MutableInteger;
-import org.agrona.concurrent.BackoffIdleStrategy;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 
+import io.aeron.samples.archive.RecordingDescriptor;
+import io.aeron.samples.archive.RecordingDescriptorCollector;
 import java.io.File;
-import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.nio.MappedByteBuffer;
-import java.nio.channels.FileChannel;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 import static io.aeron.CncFileDescriptor.*;
-import static io.aeron.archive.Archive.Configuration.DEFAULT_IDLE_STRATEGY;
-import static io.aeron.driver.Configuration.*;
 import static java.nio.channels.FileChannel.MapMode.READ_ONLY;
+import static java.nio.charset.StandardCharsets.US_ASCII;
 
 /**
  * Utility functions for the samples.
@@ -46,7 +45,8 @@ import static java.nio.channels.FileChannel.MapMode.READ_ONLY;
 public class SamplesUtil
 {
     /**
-     * Return a reusable, parametrised event loop that calls a default idler when no messages are received.
+     * Return a reusable, parametrised event loop that calls a default {@link IdleStrategy} when no messages
+     * are received.
      *
      * @param fragmentHandler to be called back for each message.
      * @param limit           passed to {@link Subscription#poll(FragmentHandler, int)}.
@@ -56,9 +56,7 @@ public class SamplesUtil
     public static Consumer<Subscription> subscriberLoop(
         final FragmentHandler fragmentHandler, final int limit, final AtomicBoolean running)
     {
-        final IdleStrategy idleStrategy = SampleConfiguration.newIdleStrategy();
-
-        return subscriberLoop(fragmentHandler, limit, running, idleStrategy);
+        return subscriberLoop(fragmentHandler, limit, running, SampleConfiguration.newIdleStrategy());
     }
 
     /**
@@ -79,17 +77,11 @@ public class SamplesUtil
         return
             (subscription) ->
             {
-                try
+                final FragmentAssembler assembler = new FragmentAssembler(fragmentHandler);
+                while (running.get())
                 {
-                    while (running.get())
-                    {
-                        final int fragmentsRead = subscription.poll(fragmentHandler, limit);
-                        idleStrategy.idle(fragmentsRead);
-                    }
-                }
-                catch (final Exception ex)
-                {
-                    LangUtil.rethrowUnchecked(ex);
+                    final int fragmentsRead = subscription.poll(assembler, limit);
+                    idleStrategy.idle(fragmentsRead);
                 }
             };
     }
@@ -100,16 +92,14 @@ public class SamplesUtil
      * @param streamId to show when printing.
      * @return subscription data handler function that prints the message contents.
      */
-    public static FragmentHandler printStringMessage(final int streamId)
+    public static FragmentHandler printAsciiMessage(final int streamId)
     {
         return (buffer, offset, length, header) ->
         {
-            final byte[] data = new byte[length];
-            buffer.getBytes(offset, data);
-
-            System.out.println(String.format(
-                "Message to stream %d from session %d (%d@%d) <<%s>>",
-                streamId, header.sessionId(), length, offset, new String(data)));
+            final String msg = buffer.getStringWithoutLengthAscii(offset, length);
+            System.out.printf(
+                "Message to stream %d from session %d (%d@%d) <<%s>>%n",
+                streamId, header.sessionId(), length, offset, msg);
         };
     }
 
@@ -122,7 +112,7 @@ public class SamplesUtil
      */
     public static FragmentHandler rateReporterHandler(final RateReporter reporter)
     {
-        return (buffer, offset, length, header) -> reporter.onMessage(1, length);
+        return (buffer, offset, length, header) -> reporter.onMessage(length);
     }
 
     /**
@@ -130,11 +120,10 @@ public class SamplesUtil
      *
      * @param channel   for the error.
      * @param streamId  for the error.
-     * @param sessionId for the error, if source.
+     * @param sessionId for the error, if it has a source.
      * @param message   indicating what the error was.
      * @param cause     of the error.
      */
-    @SuppressWarnings("unused")
     public static void printError(
         final String channel,
         final int streamId,
@@ -159,9 +148,9 @@ public class SamplesUtil
         final long totalMessages,
         final long totalBytes)
     {
-        System.out.println(String.format(
-            "%.04g msgs/sec, %.04g payload bytes/sec, totals %d messages %d MB",
-            messagesPerSec, bytesPerSec, totalMessages, totalBytes / (1024 * 1024)));
+        System.out.printf(
+            "%.04g msgs/sec, %.04g payload bytes/sec, totals %d messages %d MB%n",
+            messagesPerSec, bytesPerSec, totalMessages, totalBytes / (1024 * 1024));
     }
 
     /**
@@ -172,9 +161,10 @@ public class SamplesUtil
     public static void printAvailableImage(final Image image)
     {
         final Subscription subscription = image.subscription();
-        System.out.println(String.format(
-            "Available image on %s streamId=%d sessionId=%d from %s",
-            subscription.channel(), subscription.streamId(), image.sessionId(), image.sourceIdentity()));
+        System.out.printf(
+            "Available image on %s streamId=%d sessionId=%d mtu=%d term-length=%d from %s%n",
+            subscription.channel(), subscription.streamId(), image.sessionId(), image.mtuLength(),
+            image.termBufferLength(), image.sourceIdentity());
     }
 
     /**
@@ -185,9 +175,9 @@ public class SamplesUtil
     public static void printUnavailableImage(final Image image)
     {
         final Subscription subscription = image.subscription();
-        System.out.println(String.format(
-            "Unavailable image on %s streamId=%d sessionId=%d",
-            subscription.channel(), subscription.streamId(), image.sessionId()));
+        System.out.printf(
+            "Unavailable image on %s streamId=%d sessionId=%d%n",
+            subscription.channel(), subscription.streamId(), image.sessionId());
     }
 
     /**
@@ -198,24 +188,7 @@ public class SamplesUtil
      */
     public static MappedByteBuffer mapExistingFileReadOnly(final File location)
     {
-        if (!location.exists())
-        {
-            final String msg = "file not found: " + location.getAbsolutePath();
-            throw new IllegalStateException(msg);
-        }
-
-        MappedByteBuffer mappedByteBuffer = null;
-        try (RandomAccessFile file = new RandomAccessFile(location, "r");
-            FileChannel channel = file.getChannel())
-        {
-            mappedByteBuffer = channel.map(READ_ONLY, 0, channel.size());
-        }
-        catch (final IOException ex)
-        {
-            LangUtil.rethrowUnchecked(ex);
-        }
-
-        return mappedByteBuffer;
+        return IoUtil.mapExistingFile(location, READ_ONLY, location.getName());
     }
 
     /**
@@ -236,7 +209,8 @@ public class SamplesUtil
 
         return new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaData),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaData));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaData),
+            US_ASCII);
     }
 
     /**
@@ -259,36 +233,38 @@ public class SamplesUtil
 
         return new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaData),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaData));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaData),
+            US_ASCII);
     }
 
     /**
-     * Create an {@link IdleStrategy} that can be used to.
+     * Find the latest {@link RecordingDescriptor} for a stream.
      *
-     * @param strategyName of the class to be created.
-     * @return the newly created IdleStrategy.
+     * @param aeronArchive an {@link AeronArchive} instance.
+     * @param channelFragment a fragment of the recorded stream's channel
+     * @param streamId the stream ID of the recorded stream.
+     * @return the {@link CountersReader} over the CnC file.
      */
-    public static IdleStrategy newIdleStrategy(final String strategyName)
+    public static RecordingDescriptor findLatestRecording(
+         final AeronArchive aeronArchive,
+         final String channelFragment,
+         final int streamId
+    )
     {
-        IdleStrategy idleStrategy = null;
+        final RecordingDescriptorCollector collector = new RecordingDescriptorCollector(1);
 
-        if (DEFAULT_IDLE_STRATEGY.equals(strategyName))
+        if (0 == aeronArchive.listRecordingsForUri(
+            0,
+            Integer.MAX_VALUE,
+            channelFragment,
+            streamId,
+            collector.reset())
+        )
         {
-            idleStrategy = new BackoffIdleStrategy(
-                IDLE_MAX_SPINS, IDLE_MAX_YIELDS, IDLE_MIN_PARK_NS, IDLE_MAX_PARK_NS);
-        }
-        else
-        {
-            try
-            {
-                idleStrategy = (IdleStrategy)Class.forName(strategyName).getConstructor().newInstance();
-            }
-            catch (final Exception ex)
-            {
-                LangUtil.rethrowUnchecked(ex);
-            }
+            return null;
         }
 
-        return idleStrategy;
+        final int lastIndex = collector.descriptors().size() - 1;
+        return collector.descriptors().get(lastIndex);
     }
 }

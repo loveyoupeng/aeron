@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -107,7 +107,7 @@ public class FragmentAssembler implements FragmentHandler
      * @param buffer containing the data.
      * @param offset at which the data begins.
      * @param length of the data in bytes.
-     * @param header representing the meta data for the data.
+     * @param header representing the metadata for the data.
      */
     public void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
@@ -129,19 +129,33 @@ public class FragmentAssembler implements FragmentHandler
         if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
         {
             final BufferBuilder builder = getBufferBuilder(header.sessionId());
-            builder.reset().append(buffer, offset, length);
+            builder.reset()
+                .captureHeader(header)
+                .append(buffer, offset, length)
+                .nextTermOffset(header.nextTermOffset());
         }
         else
         {
             final BufferBuilder builder = builderBySessionIdMap.get(header.sessionId());
-            if (null != builder && builder.limit() != 0)
+            if (null != builder)
             {
-                builder.append(buffer, offset, length);
-
-                if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
+                if (header.termOffset() == builder.nextTermOffset())
                 {
-                    final int msgLength = builder.limit();
-                    delegate.onFragment(builder.buffer(), 0, msgLength, header);
+                    builder.append(buffer, offset, length);
+
+                    if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
+                    {
+                        delegate.onFragment(
+                            builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
+                        builder.reset();
+                    }
+                    else
+                    {
+                        builder.nextTermOffset(header.nextTermOffset());
+                    }
+                }
+                else
+                {
                     builder.reset();
                 }
             }

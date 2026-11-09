@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,8 @@
  */
 
 #include <cstdint>
-#include <cstdio>
-#include <signal.h>
+#include <csignal>
 #include <thread>
-#include <array>
 
 #include "util/CommandOptionParser.h"
 #include "concurrent/BusySpinIdleStrategy.h"
@@ -31,10 +29,19 @@ using namespace aeron;
 
 std::atomic<bool> running(true);
 
-void sigIntHandler(int param)
+void sigIntHandler(int)
 {
     running = false;
 }
+
+void checkInterrupt()
+{
+    if (!running)
+    {
+        throw std::runtime_error("Interrupted");
+    }
+}
+
 
 static const char optHelp         = 'h';
 static const char optPrefix       = 'p';
@@ -46,7 +53,7 @@ static const char optFrags        = 'f';
 
 struct Settings
 {
-    std::string dirPrefix = "";
+    std::string dirPrefix;
     std::string pingChannel = samples::configuration::DEFAULT_PING_CHANNEL;
     std::string pongChannel = samples::configuration::DEFAULT_PONG_CHANNEL;
     std::int32_t pingStreamId = samples::configuration::DEFAULT_PING_STREAM_ID;
@@ -54,7 +61,7 @@ struct Settings
     int fragmentCountLimit = samples::configuration::DEFAULT_FRAGMENT_COUNT_LIMIT;
 };
 
-Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
+Settings parseCmdLine(CommandOptionParser &cp, int argc, char **argv)
 {
     cp.parse(argc, argv);
     if (cp.getOption(optHelp).isPresent())
@@ -86,8 +93,6 @@ int main(int argc, char **argv)
     cp.addOption(CommandOption(optPongStreamId, 1, 1, "streamId        Pong Stream ID."));
     cp.addOption(CommandOption(optFrags,        1, 1, "limit           Fragment Count Limit."));
 
-    signal (SIGINT, sigIntHandler);
-
     try
     {
         Settings settings = parseCmdLine(cp, argc, argv);
@@ -103,24 +108,26 @@ int main(int argc, char **argv)
         }
 
         context.newSubscriptionHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int64_t correlationId)
             {
                 std::cout << "Subscription: " << channel << " " << correlationId << ":" << streamId << std::endl;
             });
 
         context.newPublicationHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
             {
                 std::cout << "Publication: " << channel << " " << correlationId << ":" << streamId << ":" << sessionId << std::endl;
             });
 
-        context.availableImageHandler([](Image &image)
+        context.availableImageHandler(
+            [](Image &image)
             {
                 std::cout << "Available image correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
                 std::cout << " at position=" << image.position() << " from " << image.sourceIdentity() << std::endl;
             });
 
-        context.unavailableImageHandler([](Image &image)
+        context.unavailableImageHandler(
+            [](Image &image)
             {
                 std::cout << "Unavailable image on correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
                 std::cout << " at position=" << image.position() << " from " << image.sourceIdentity() << std::endl;
@@ -129,37 +136,42 @@ int main(int argc, char **argv)
         context.preTouchMappedMemory(true);
 
         Aeron aeron(context);
-
+        signal(SIGINT, sigIntHandler);
         std::int64_t subscriptionId = aeron.addSubscription(settings.pingChannel, settings.pingStreamId);
-        std::int64_t publicationId = aeron.addPublication(settings.pongChannel, settings.pongStreamId);
+        std::int64_t publicationId = aeron.addExclusivePublication(settings.pongChannel, settings.pongStreamId);
 
         std::shared_ptr<Subscription> pingSubscription = aeron.findSubscription(subscriptionId);
         while (!pingSubscription)
         {
+            checkInterrupt();
+
             std::this_thread::yield();
             pingSubscription = aeron.findSubscription(subscriptionId);
         }
 
-        std::shared_ptr<Publication> pongPublication = aeron.findPublication(publicationId);
+        std::shared_ptr<ExclusivePublication> pongPublication = aeron.findExclusivePublication(publicationId);
         while (!pongPublication)
         {
+            checkInterrupt();
+
             std::this_thread::yield();
-            pongPublication = aeron.findPublication(publicationId);
+            pongPublication = aeron.findExclusivePublication(publicationId);
         }
 
-        Publication &pongPublicationRef = *pongPublication;
+        ExclusivePublication &pongPublicationRef = *pongPublication;
         Subscription &pingSubscriptionRef = *pingSubscription;
 
         BusySpinIdleStrategy idleStrategy;
         BusySpinIdleStrategy pingHandlerIdleStrategy;
         FragmentAssembler fragmentAssembler(
-            [&](AtomicBuffer& buffer, index_t offset, index_t length, const Header& header)
+            [&](AtomicBuffer &buffer, index_t offset, index_t length, const Header &header)
             {
                 if (pongPublicationRef.offer(buffer, offset, length) > 0L)
                 {
                     return;
                 }
 
+                pingHandlerIdleStrategy.reset();
                 while (pongPublicationRef.offer(buffer, offset, length) < 0L)
                 {
                     pingHandlerIdleStrategy.idle();
@@ -175,20 +187,20 @@ int main(int argc, char **argv)
 
         std::cout << "Shutting down...\n";
     }
-    catch (const CommandOptionException& e)
+    catch (const CommandOptionException &e)
     {
         std::cerr << "ERROR: " << e.what() << std::endl << std::endl;
         cp.displayOptionsHelp(std::cerr);
         return -1;
     }
-    catch (const SourcedException& e)
+    catch (const SourcedException &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << e.where() << std::endl;
         return -1;
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
-        std::cerr << "FAILED: " << e.what() << " : " << std::endl;
+        std::cerr << "FAILED: " << e.what() << std::endl;
         return -1;
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,86 +27,144 @@ import static org.agrona.BitUtil.SIZE_OF_SHORT;
 /**
  * Flyweight for general Aeron network protocol header of a message frame.
  * <pre>
- *   0                   1                   2                   3
- *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
- *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *  |                        Frame Length                           |
- *  +---------------------------------------------------------------+
- *  |  Version    |     Flags     |               Type              |
- *  +-------------+---------------+---------------------------------+
- *  |                       Depends on Type                        ...
+ *  0                   1                   2                   3
+ *  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ * |R|                       Frame Length                          |
+ * +---------------+---------------+-------------------------------+
+ * |    Version    |     Flags     |             Type              |
+ * +---------------+---------------+-------------------------------+
+ * |                       Depends on Type                        ...
  * </pre>
  */
 public class HeaderFlyweight extends UnsafeBuffer
 {
     /**
-     * header type PAD
+     * Header type PAD.
      */
     public static final int HDR_TYPE_PAD = 0x00;
 
     /**
-     * header type DATA
+     * Header type DATA.
      */
     public static final int HDR_TYPE_DATA = 0x01;
 
     /**
-     * header type NAK
+     * Header type NAK.
      */
     public static final int HDR_TYPE_NAK = 0x02;
 
     /**
-     * header type SM
+     * Header type SM.
      */
     public static final int HDR_TYPE_SM = 0x03;
 
     /**
-     * header type ERR
+     * Header type ERR.
      */
     public static final int HDR_TYPE_ERR = 0x04;
 
     /**
-     * header type SETUP
+     * Header type SETUP.
      */
     public static final int HDR_TYPE_SETUP = 0x05;
+
     /**
-     * header type RTT Measurement
+     * Header type RTT Measurement.
      */
     public static final int HDR_TYPE_RTTM = 0x06;
 
     /**
-     * header type EXT
+     * Header type RESOLUTION.
+     */
+    public static final int HDR_TYPE_RES = 0x07;
+
+    /**
+     * Header type ATS Data.
+     */
+    public static final int HDR_TYPE_ATS_DATA = 0x08;
+
+    /**
+     * Header type ATS Status Message.
+     */
+    public static final int HDR_TYPE_ATS_SM = 0x09;
+
+    /**
+     * Header type ATS Setup.
+     */
+    public static final int HDR_TYPE_ATS_SETUP = 0x0A;
+
+    /**
+     * Header type Response Setup.
+     */
+    public static final int HDR_TYPE_RSP_SETUP = 0x0B;
+
+    /**
+     * Header type EXT.
      */
     public static final int HDR_TYPE_EXT = 0xFFFF;
 
     /**
-     * default version
+     * Default version.
      */
     public static final byte CURRENT_VERSION = 0x0;
 
+    /**
+     * Offset in the frame at which the frame length field begins.
+     */
     public static final int FRAME_LENGTH_FIELD_OFFSET = 0;
+
+    /**
+     * Offset in the frame at which the version field begins.
+     */
     public static final int VERSION_FIELD_OFFSET = 4;
+
+    /**
+     * Offset in the frame at which the flags field begins.
+     */
     public static final int FLAGS_FIELD_OFFSET = 5;
+
+    /**
+     * Offset in the frame at which the frame type field begins.
+     */
     public static final int TYPE_FIELD_OFFSET = 6;
+
+    /**
+     * Minimum length of any Aeron frame.
+     */
     public static final int MIN_HEADER_LENGTH = TYPE_FIELD_OFFSET + SIZE_OF_SHORT;
 
+    /**
+     * Default constructor which can later be used to wrap a frame.
+     */
     public HeaderFlyweight()
     {
     }
 
+    /**
+     * Construct a flyweight which wraps a {@link UnsafeBuffer} over the frame.
+     *
+     * @param buffer to wrap for the flyweight.
+     */
     public HeaderFlyweight(final UnsafeBuffer buffer)
     {
         super(buffer);
     }
 
+    /**
+     * Construct a flyweight which wraps a {@link ByteBuffer} over the frame.
+     *
+     * @param buffer to wrap for the flyweight.
+     */
     public HeaderFlyweight(final ByteBuffer buffer)
     {
         super(buffer);
     }
 
     /**
-     * return version field value
+     * The version field value.
      *
-     * @return ver field value
+     * @return version field value.
      */
     public short version()
     {
@@ -114,10 +172,10 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * set version field value
+     * Set the version field value.
      *
-     * @param version field value
-     * @return flyweight
+     * @param version field value to be set.
+     * @return this for a fluent API.
      */
     public HeaderFlyweight version(final short version)
     {
@@ -127,9 +185,9 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * return flags field value
+     * The flags field value.
      *
-     * @return flags field value
+     * @return the flags field value.
      */
     public short flags()
     {
@@ -137,10 +195,10 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * set the flags field value
+     * Set the flags field value.
      *
-     * @param flags field value
-     * @return flyweight
+     * @param flags field value.
+     * @return this for a fluent API.
      */
     public HeaderFlyweight flags(final short flags)
     {
@@ -150,9 +208,9 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * return header type field
+     * The type field value.
      *
-     * @return type field value
+     * @return the type field value.
      */
     public int headerType()
     {
@@ -160,10 +218,10 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * set header type field
+     * Set the type field value.
      *
-     * @param type field value
-     * @return flyweight
+     * @param type field value.
+     * @return this for a fluent API.
      */
     public HeaderFlyweight headerType(final int type)
     {
@@ -173,9 +231,9 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * return frame length field
+     * The length of the frame field value.
      *
-     * @return frame length field
+     * @return length of the frame field value.
      */
     public int frameLength()
     {
@@ -183,10 +241,10 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * set frame length field
+     * Set the length of the frame field value.
      *
-     * @param length field value
-     * @return flyweight
+     * @param length field value.
+     * @return this for a fluent API.
      */
     public HeaderFlyweight frameLength(final int length)
     {
@@ -196,10 +254,10 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * Convert header flags to an array of chars to be human readable.
+     * Convert header flags to an array of chars to be human-readable.
      *
      * @param flags to be converted.
-     * @return header flags converted to an array of chars to be human readable.
+     * @return header flags converted to an array of chars to be human-readable.
      */
     public static char[] flagsToChars(final short flags)
     {
@@ -221,7 +279,7 @@ public class HeaderFlyweight extends UnsafeBuffer
     }
 
     /**
-     * Append header flags to an {@link Appendable} to be human readable.
+     * Append header flags to an {@link Appendable} to be human-readable.
      *
      * @param flags      to be converted.
      * @param appendable to append flags to.

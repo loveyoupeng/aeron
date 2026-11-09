@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,6 +36,11 @@ import static io.aeron.CncFileDescriptor.*;
  */
 public class DriverTool
 {
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         boolean printPidOnly = false;
@@ -56,7 +61,9 @@ public class DriverTool
         }
 
         final File cncFile = CommonContext.newDefaultCncFile();
-        final MappedByteBuffer cncByteBuffer = IoUtil.mapExistingFile(cncFile, "cnc");
+        final MappedByteBuffer cncByteBuffer = (printPidOnly || !terminateDriver) ?
+            SamplesUtil.mapExistingFileReadOnly(cncFile) :
+            IoUtil.mapExistingFile(cncFile, "cnc");
         final DirectBuffer cncMetaData = createMetaDataBuffer(cncByteBuffer);
         final int cncVersion = cncMetaData.getInt(cncVersionOffset(0));
 
@@ -80,7 +87,7 @@ public class DriverTool
         else
         {
             System.out.println("Command `n Control file: " + cncFile);
-            System.out.format("Version: %d, PID: %d%n", cncVersion, pid(cncMetaData));
+            System.out.println("Version: " + cncVersion + ", PID: " + pid(cncMetaData));
             printDateActivityAndStartTimestamps(startTimestampMs(cncMetaData), toDriver.consumerHeartbeatTime());
         }
     }
@@ -88,7 +95,7 @@ public class DriverTool
     private static void printDateActivityAndStartTimestamps(final long startTimestamp, final long activityTimestamp)
     {
         System.out.format(
-            "%1$tH:%1$tM:%1$tS (start: %2tF %2$tH:%2$tM:%2$tS, activity: %3tF %3$tH:%3$tM:%3$tS)%n",
+            "%1$tH:%1$tM:%1$tS (start: %2$tF %2$tH:%2$tM:%2$tS, activity: %3$tF %3$tH:%3$tM:%3$tS)%n",
             new Date(),
             new Date(startTimestamp),
             new Date(activityTimestamp));
@@ -100,10 +107,11 @@ public class DriverTool
         {
             if ("-?".equals(arg) || "-h".equals(arg) || "-help".equals(arg))
             {
-                System.out.println(
-                    "\"Usage: [-Daeron.dir=<directory containing CnC file>] DriverTool <pid> <terminate>");
-                System.out.println("  pid: prints PID of driver only.");
-                System.out.println("  terminate: request the driver to terminate.");
+                System.out.format(
+                    "Usage: [-Daeron.dir=<directory containing CnC file>] DriverTool <pid> <terminate>%n" +
+                    "    pid: prints PID of driver only%n" +
+                    "    terminate: request the driver to terminate%n");
+                System.out.flush();
                 System.exit(0);
             }
         }

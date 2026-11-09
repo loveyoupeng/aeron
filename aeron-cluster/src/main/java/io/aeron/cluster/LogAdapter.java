@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,24 +15,29 @@
  */
 package io.aeron.cluster;
 
+import io.aeron.Aeron;
+import io.aeron.BufferBuilder;
 import io.aeron.Image;
-import io.aeron.ImageControlledFragmentAssembler;
-import io.aeron.cluster.client.ClusterClock;
-import io.aeron.cluster.client.ClusterException;
+import io.aeron.Subscription;
 import io.aeron.cluster.codecs.*;
+import io.aeron.cluster.service.ClusterClock;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
+import org.agrona.BitUtil;
+import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
 
-import static io.aeron.cluster.client.AeronCluster.SESSION_HEADER_LENGTH;
+import static io.aeron.logbuffer.FrameDescriptor.*;
+import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 
-final class LogAdapter implements ControlledFragmentHandler, AutoCloseable
+final class LogAdapter implements ControlledFragmentHandler
 {
-    private static final int FRAGMENT_LIMIT = 100;
-
-    private final ImageControlledFragmentAssembler fragmentAssembler = new ImageControlledFragmentAssembler(this);
-    private final Image image;
+    private final int fragmentLimit;
+    private long logPosition;
+    private Image image;
     private final ConsensusModuleAgent consensusModuleAgent;
+    private final BufferBuilder builder = new BufferBuilder();
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final SessionOpenEventDecoder sessionOpenEventDecoder = new SessionOpenEventDecoder();
     private final SessionCloseEventDecoder sessionCloseEventDecoder = new SessionCloseEventDecoder();
@@ -40,32 +45,77 @@ final class LogAdapter implements ControlledFragmentHandler, AutoCloseable
     private final TimerEventDecoder timerEventDecoder = new TimerEventDecoder();
     private final ClusterActionRequestDecoder clusterActionRequestDecoder = new ClusterActionRequestDecoder();
     private final NewLeadershipTermEventDecoder newLeadershipTermEventDecoder = new NewLeadershipTermEventDecoder();
-    private final MembershipChangeEventDecoder membershipChangeEventDecoder = new MembershipChangeEventDecoder();
 
-    LogAdapter(final Image image, final ConsensusModuleAgent consensusModuleAgent)
+    LogAdapter(final ConsensusModuleAgent consensusModuleAgent, final int fragmentLimit)
     {
-        this.image = image;
         this.consensusModuleAgent = consensusModuleAgent;
+        this.fragmentLimit = fragmentLimit;
     }
 
-    public void close()
+    long disconnect(final ErrorHandler errorHandler)
     {
-        image.subscription().close();
+        long registrationId = Aeron.NULL_VALUE;
+
+        if (null != image)
+        {
+            logPosition = image.position();
+            CloseHelper.close(errorHandler, image.subscription());
+            registrationId = image.subscription().registrationId();
+            image = null;
+        }
+
+        return registrationId;
+    }
+
+    void disconnect(final ErrorHandler errorHandler, final long maxLogPosition)
+    {
+        consensusModuleAgent.awaitLocalSocketsClosed(disconnect(errorHandler));
+        logPosition = Math.min(logPosition, maxLogPosition);
+    }
+
+    Subscription subscription()
+    {
+        return null == image ? null : image.subscription();
+    }
+
+    ConsensusModuleAgent consensusModuleAgent()
+    {
+        return consensusModuleAgent;
     }
 
     long position()
     {
+        if (null == image)
+        {
+            return logPosition;
+        }
+
         return image.position();
     }
 
     int poll(final long boundPosition)
     {
-        return image.boundedControlledPoll(fragmentAssembler, boundPosition, FRAGMENT_LIMIT);
+        if (null == image)
+        {
+            return 0;
+        }
+
+        return image.boundedControlledPoll(this, boundPosition, fragmentLimit);
     }
 
     boolean isImageClosed()
     {
-        return image.isClosed();
+        return null == image || image.isClosed();
+    }
+
+    boolean isLogEndOfStream()
+    {
+        return null != image && image.isEndOfStream();
+    }
+
+    boolean isLogEndOfStreamAt(final long position)
+    {
+        return null != image && position == image.endOfStreamPosition();
     }
 
     Image image()
@@ -73,57 +123,111 @@ final class LogAdapter implements ControlledFragmentHandler, AutoCloseable
         return image;
     }
 
-    void removeDestination(final String destination)
+    void image(final Image image)
     {
-        if (null != image)
+        if (null != this.image)
         {
-            image.subscription().removeDestination(destination);
+            logPosition = this.image.position();
+        }
+
+        this.image = image;
+    }
+
+    void asyncRemoveDestination(final String destination)
+    {
+        if (null != image && !image.subscription().isClosed())
+        {
+            image.subscription().asyncRemoveDestination(destination);
         }
     }
 
-    @SuppressWarnings("MethodLength")
     public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    {
+        Action action = Action.CONTINUE;
+        final byte flags = header.flags();
+
+        if ((flags & UNFRAGMENTED) == UNFRAGMENTED)
+        {
+            action = onMessage(buffer, offset, length, header);
+        }
+        else if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
+        {
+            builder.reset()
+                .captureHeader(header)
+                .append(buffer, offset, length)
+                .nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
+        }
+        else if (offset == builder.nextTermOffset())
+        {
+            final int limit = builder.limit();
+
+            builder.append(buffer, offset, length);
+
+            if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
+            {
+                action = onMessage(builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
+
+                if (Action.ABORT == action)
+                {
+                    builder.limit(limit);
+                }
+                else
+                {
+                    builder.reset();
+                }
+            }
+            else
+            {
+                builder.nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
+            }
+        }
+        else
+        {
+            builder.reset();
+        }
+
+        return action;
+    }
+
+    @SuppressWarnings("MethodLength")
+    private Action onMessage(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
         final int schemaId = messageHeaderDecoder.schemaId();
+        final int templateId = messageHeaderDecoder.templateId();
+        final int actingVersion = messageHeaderDecoder.version();
+        final int actingBlockLength = messageHeaderDecoder.blockLength();
         if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
         {
-            throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
-        }
-
-        final int templateId = messageHeaderDecoder.templateId();
-        if (templateId == SessionMessageHeaderDecoder.TEMPLATE_ID)
-        {
-            sessionHeaderDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
-
-            consensusModuleAgent.onReplaySessionMessage(
-                sessionHeaderDecoder.clusterSessionId(),
-                sessionHeaderDecoder.timestamp(),
-                buffer,
-                offset + SESSION_HEADER_LENGTH,
-                length - SESSION_HEADER_LENGTH,
-                header);
-
-            return Action.CONTINUE;
+            return consensusModuleAgent.onReplayExtensionMessage(
+                actingBlockLength, templateId, schemaId, actingVersion, buffer, offset, length, header);
         }
 
         switch (templateId)
         {
+            case SessionMessageHeaderDecoder.TEMPLATE_ID:
+                sessionHeaderDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    actingVersion);
+
+                consensusModuleAgent.onReplaySessionMessage(
+                    sessionHeaderDecoder.clusterSessionId(),
+                    sessionHeaderDecoder.timestamp());
+
+                return Action.CONTINUE;
+
             case TimerEventDecoder.TEMPLATE_ID:
                 timerEventDecoder.wrap(
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onReplayTimerEvent(
-                    timerEventDecoder.correlationId(),
-                    timerEventDecoder.timestamp());
+                    timerEventDecoder.correlationId());
                 break;
 
             case SessionOpenEventDecoder.TEMPLATE_ID:
@@ -131,7 +235,7 @@ final class LogAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onReplaySessionOpen(
                     header.position(),
@@ -147,48 +251,11 @@ final class LogAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
 
                 consensusModuleAgent.onReplaySessionClose(
                     sessionCloseEventDecoder.clusterSessionId(),
-                    sessionCloseEventDecoder.timestamp(),
                     sessionCloseEventDecoder.closeReason());
-                break;
-
-            case NewLeadershipTermEventDecoder.TEMPLATE_ID:
-                newLeadershipTermEventDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onReplayNewLeadershipTermEvent(
-                    newLeadershipTermEventDecoder.leadershipTermId(),
-                    newLeadershipTermEventDecoder.logPosition(),
-                    newLeadershipTermEventDecoder.timestamp(),
-                    newLeadershipTermEventDecoder.termBaseLogPosition(),
-                    newLeadershipTermEventDecoder.leaderMemberId(),
-                    newLeadershipTermEventDecoder.logSessionId(),
-                    ClusterClock.map(newLeadershipTermEventDecoder.timeUnit()),
-                    newLeadershipTermEventDecoder.appVersion());
-                break;
-
-            case MembershipChangeEventDecoder.TEMPLATE_ID:
-                membershipChangeEventDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                consensusModuleAgent.onMembershipChange(
-                    membershipChangeEventDecoder.leadershipTermId(),
-                    membershipChangeEventDecoder.logPosition(),
-                    membershipChangeEventDecoder.timestamp(),
-                    membershipChangeEventDecoder.leaderMemberId(),
-                    membershipChangeEventDecoder.clusterSize(),
-                    membershipChangeEventDecoder.changeType(),
-                    membershipChangeEventDecoder.memberId(),
-                    membershipChangeEventDecoder.clusterMembers());
                 break;
 
             case ClusterActionRequestDecoder.TEMPLATE_ID:
@@ -196,14 +263,34 @@ final class LogAdapter implements ControlledFragmentHandler, AutoCloseable
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
+                    actingVersion);
+
+                final int flags = ClusterActionRequestDecoder.flagsNullValue() != clusterActionRequestDecoder.flags() ?
+                    clusterActionRequestDecoder.flags() : ConsensusModule.CLUSTER_ACTION_FLAGS_DEFAULT;
 
                 consensusModuleAgent.onReplayClusterAction(
                     clusterActionRequestDecoder.leadershipTermId(),
                     clusterActionRequestDecoder.logPosition(),
                     clusterActionRequestDecoder.timestamp(),
-                    clusterActionRequestDecoder.action());
+                    clusterActionRequestDecoder.action(),
+                    flags);
                 return Action.BREAK;
+
+            case NewLeadershipTermEventDecoder.TEMPLATE_ID:
+                newLeadershipTermEventDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    actingVersion);
+
+                consensusModuleAgent.onReplayNewLeadershipTermEvent(
+                    newLeadershipTermEventDecoder.leadershipTermId(),
+                    newLeadershipTermEventDecoder.logPosition(),
+                    newLeadershipTermEventDecoder.timestamp(),
+                    newLeadershipTermEventDecoder.termBaseLogPosition(),
+                    ClusterClock.map(newLeadershipTermEventDecoder.timeUnit()),
+                    newLeadershipTermEventDecoder.appVersion());
+                break;
         }
 
         return Action.CONTINUE;

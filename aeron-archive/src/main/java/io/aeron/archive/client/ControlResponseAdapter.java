@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,40 +17,62 @@ package io.aeron.archive.client;
 
 import io.aeron.FragmentAssembler;
 import io.aeron.Subscription;
-import io.aeron.archive.codecs.ControlResponseDecoder;
-import io.aeron.archive.codecs.MessageHeaderDecoder;
-import io.aeron.archive.codecs.MessageHeaderEncoder;
-import io.aeron.archive.codecs.RecordingDescriptorDecoder;
-import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.archive.codecs.*;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 
 /**
  * Encapsulate the polling, decoding, and dispatching of archive control protocol response messages.
  */
-public class ControlResponseAdapter implements FragmentHandler
+public final class ControlResponseAdapter
 {
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final ControlResponseDecoder controlResponseDecoder = new ControlResponseDecoder();
     private final RecordingDescriptorDecoder recordingDescriptorDecoder = new RecordingDescriptorDecoder();
+    private final RecordingSignalEventDecoder recordingSignalEventDecoder = new RecordingSignalEventDecoder();
 
     private final int fragmentLimit;
-    private final ControlResponseListener listener;
+    private final ControlResponseListener controlResponseListener;
+    private final RecordingSignalConsumer recordingSignalConsumer;
     private final Subscription subscription;
-    private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this);
+    private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this::onFragment);
 
     /**
      * Create an adapter for a given subscription to an archive for control response messages.
      *
-     * @param listener      to which responses are dispatched.
-     * @param subscription  to poll for new events.
-     * @param fragmentLimit to apply for each polling operation.
+     * @param controlResponseListener for dispatching responses.
+     * @param subscription            to poll for responses.
+     * @param fragmentLimit           to apply for each polling operation.
      */
     public ControlResponseAdapter(
-        final ControlResponseListener listener, final Subscription subscription, final int fragmentLimit)
+        final ControlResponseListener controlResponseListener,
+        final Subscription subscription,
+        final int fragmentLimit)
+    {
+        this(
+            controlResponseListener,
+            AeronArchive.Configuration.NO_OP_RECORDING_SIGNAL_CONSUMER,
+            subscription,
+            fragmentLimit);
+    }
+
+    /**
+     * Create an adapter for a given subscription to an archive for control response messages.
+     *
+     * @param controlResponseListener for dispatching responses.
+     * @param recordingSignalConsumer for dispatching recording signals.
+     * @param subscription            to poll for responses.
+     * @param fragmentLimit           to apply for each polling operation.
+     */
+    public ControlResponseAdapter(
+        final ControlResponseListener controlResponseListener,
+        final RecordingSignalConsumer recordingSignalConsumer,
+        final Subscription subscription,
+        final int fragmentLimit)
     {
         this.fragmentLimit = fragmentLimit;
-        this.listener = listener;
+        this.controlResponseListener = controlResponseListener;
+        this.recordingSignalConsumer = recordingSignalConsumer;
         this.subscription = subscription;
     }
 
@@ -92,11 +114,7 @@ public class ControlResponseAdapter implements FragmentHandler
             decoder.sourceIdentity());
     }
 
-    public void onFragment(
-        final DirectBuffer buffer,
-        final int offset,
-        @SuppressWarnings("unused") final int length,
-        @SuppressWarnings("unused") final Header header)
+    void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
@@ -106,15 +124,18 @@ public class ControlResponseAdapter implements FragmentHandler
             throw new ArchiveException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
-        switch (templateId)
+        switch (messageHeaderDecoder.templateId())
         {
             case ControlResponseDecoder.TEMPLATE_ID:
-                handleControlResponse(listener, buffer, offset);
+                handleControlResponse(controlResponseListener, buffer, offset);
                 break;
 
             case RecordingDescriptorDecoder.TEMPLATE_ID:
-                handleRecordingDescriptor(listener, buffer, offset);
+                handleRecordingDescriptor(controlResponseListener, buffer, offset);
+                break;
+
+            case RecordingSignalEventDecoder.TEMPLATE_ID:
+                handleRecordingSignal(recordingSignalConsumer, buffer, offset);
                 break;
         }
     }
@@ -146,5 +167,23 @@ public class ControlResponseAdapter implements FragmentHandler
             messageHeaderDecoder.version());
 
         dispatchDescriptor(recordingDescriptorDecoder, listener);
+    }
+
+    private void handleRecordingSignal(
+        final RecordingSignalConsumer recordingSignalConsumer, final DirectBuffer buffer, final int offset)
+    {
+        recordingSignalEventDecoder.wrap(
+            buffer,
+            offset + MessageHeaderDecoder.ENCODED_LENGTH,
+            messageHeaderDecoder.blockLength(),
+            messageHeaderDecoder.version());
+
+        recordingSignalConsumer.onSignal(
+            recordingSignalEventDecoder.controlSessionId(),
+            recordingSignalEventDecoder.correlationId(),
+            recordingSignalEventDecoder.recordingId(),
+            recordingSignalEventDecoder.subscriptionId(),
+            recordingSignalEventDecoder.position(),
+            recordingSignalEventDecoder.signal());
     }
 }

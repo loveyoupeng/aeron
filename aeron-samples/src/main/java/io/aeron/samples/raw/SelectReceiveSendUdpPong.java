@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,9 @@
 package io.aeron.samples.raw;
 
 import io.aeron.driver.Configuration;
-import org.agrona.concurrent.SigInt;
+import org.agrona.SystemUtil;
+import org.agrona.concurrent.HighResolutionTimer;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -34,20 +36,24 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
  * Benchmark used to calculate latency of underlying system.
- *
- * @see SendHackSelectReceiveUdpPing
  */
 public class SelectReceiveSendUdpPong
 {
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws IOException if an error occurs with the channel.
+     */
+    @SuppressWarnings("try")
     public static void main(final String[] args) throws IOException
     {
-        new SelectReceiveSendUdpPong().run();
-    }
+        if (SystemUtil.isWindows())
+        {
+            HighResolutionTimer.enable();
+        }
 
-    private void run() throws IOException
-    {
         final InetSocketAddress sendAddress = new InetSocketAddress("localhost", Common.PONG_PORT);
-
         final ByteBuffer buffer = ByteBuffer.allocateDirect(Configuration.MTU_LENGTH_DEFAULT);
 
         final DatagramChannel receiveChannel = DatagramChannel.open();
@@ -88,30 +94,33 @@ public class SelectReceiveSendUdpPong
         receiveChannel.register(selector, OP_READ, handler);
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        while (true)
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            while (selector.selectNow() == 0)
+            while (true)
             {
-                if (!running.get())
+                while (selector.selectNow() == 0)
                 {
-                    return;
-                }
-            }
+                    if (!running.get())
+                    {
+                        return;
+                    }
 
-            final Set<SelectionKey> selectedKeys = selector.selectedKeys();
-            final Iterator<SelectionKey> iter = selectedKeys.iterator();
-
-            while (iter.hasNext())
-            {
-                final SelectionKey key = iter.next();
-                if (key.isReadable())
-                {
-                    ((IntSupplier)key.attachment()).getAsInt();
+                    Thread.onSpinWait();
                 }
 
-                iter.remove();
+                final Set<SelectionKey> selectedKeys = selector.selectedKeys();
+                final Iterator<SelectionKey> iter = selectedKeys.iterator();
+
+                while (iter.hasNext())
+                {
+                    final SelectionKey key = iter.next();
+                    if (key.isReadable())
+                    {
+                        ((IntSupplier)key.attachment()).getAsInt();
+                    }
+
+                    iter.remove();
+                }
             }
         }
     }

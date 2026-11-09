@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,10 +27,13 @@ import static io.aeron.logbuffer.ControlledFragmentHandler.Action.*;
 /**
  * Encapsulate the polling, decoding, and dispatching of recording transition events for a session plus the
  * asynchronous events to check for errors.
+ * <p>
+ * Important: set the underlying {@link RecordingSignalConsumer} instance on the {@link AeronArchive} using the
+ * {@link AeronArchive.Context#recordingSignalConsumer(RecordingSignalConsumer)} method to avoid missing signals.
  *
  * @see RecordingSignal
  */
-public class RecordingSignalAdapter
+public final class RecordingSignalAdapter
 {
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final ControlResponseDecoder controlResponseDecoder = new ControlResponseDecoder();
@@ -46,11 +49,11 @@ public class RecordingSignalAdapter
     /**
      * Create an adapter for a given subscription to an archive for recording events.
      *
-     * @param controlSessionId            to listen for associated asynchronous control events, such as errors.
-     * @param controlEventListener        listener for control events which may indicate an error on the session.
+     * @param controlSessionId        to listen for associated asynchronous control events, such as errors.
+     * @param controlEventListener    listener for control events which may indicate an error on the session.
      * @param recordingSignalConsumer consumer of recording transition events.
-     * @param subscription                to poll for new events.
-     * @param fragmentLimit               to apply for each polling operation.
+     * @param subscription            to poll for new events.
+     * @param fragmentLimit           to apply for each polling operation.
      */
     public RecordingSignalAdapter(
         final long controlSessionId,
@@ -75,8 +78,22 @@ public class RecordingSignalAdapter
      */
     public int poll()
     {
-        isDone = false;
+        if (isDone)
+        {
+            isDone = false;
+        }
+
         return subscription.controlledPoll(assembler, fragmentLimit);
+    }
+
+    /**
+     * Indicate that poll was successful and a signal or control response was received.
+     *
+     * @return true if a signal or control response was received.
+     */
+    public boolean isDone()
+    {
+        return isDone;
     }
 
     private ControlledFragmentHandler.Action onFragment(
@@ -95,8 +112,7 @@ public class RecordingSignalAdapter
             throw new ArchiveException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
-        switch (templateId)
+        switch (messageHeaderDecoder.templateId())
         {
             case ControlResponseDecoder.TEMPLATE_ID:
                 controlResponseDecoder.wrap(
@@ -113,6 +129,9 @@ public class RecordingSignalAdapter
                         controlResponseDecoder.relevantId(),
                         controlResponseDecoder.code(),
                         controlResponseDecoder.errorMessage());
+
+                    isDone = true;
+                    return BREAK;
                 }
                 break;
 

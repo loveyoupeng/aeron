@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,19 +34,30 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public class ClientTimeoutFlyweight
 {
+    /**
+     * Length of the header.
+     */
+    public static final int LENGTH = SIZE_OF_LONG;
     private static final int CLIENT_ID_FIELD_OFFSET = 0;
 
-    public static final int LENGTH = SIZE_OF_LONG;
+    private MutableDirectBuffer buffer;
+    private int offset;
 
-    protected MutableDirectBuffer buffer;
-    protected int offset;
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public ClientTimeoutFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
      *
      * @param buffer to wrap
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
     public final ClientTimeoutFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
@@ -57,9 +68,9 @@ public class ClientTimeoutFlyweight
     }
 
     /**
-     * return client id field
+     * Get client id field.
      *
-     * @return client id field
+     * @return client id field.
      */
     public long clientId()
     {
@@ -67,10 +78,10 @@ public class ClientTimeoutFlyweight
     }
 
     /**
-     * set client id field
+     * Set client id field.
      *
-     * @param clientId field value
-     * @return for fluent API
+     * @param clientId field value.
+     * @return this for a fluent API.
      */
     public ClientTimeoutFlyweight clientId(final long clientId)
     {

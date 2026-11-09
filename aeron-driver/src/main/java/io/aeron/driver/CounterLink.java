@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,45 +20,58 @@ import org.agrona.concurrent.status.AtomicCounter;
 /**
  * Tracks an aeron client interest in a counter.
  */
-public class CounterLink implements DriverManagedResource
+final class CounterLink implements DriverManagedResource
 {
     private final long registrationId;
     private final AtomicCounter counter;
     private final AeronClient client;
     private boolean reachedEndOfLife = false;
 
-    public CounterLink(final AtomicCounter counter, final long registrationId, final AeronClient client)
+    CounterLink(final AtomicCounter counter, final long registrationId, final AeronClient client)
     {
         this.registrationId = registrationId;
         this.counter = counter;
         this.client = client;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
         counter.close();
     }
 
-    public long registrationId()
-    {
-        return registrationId;
-    }
-
-    public int counterId()
-    {
-        return counter.id();
-    }
-
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         if (client.hasTimedOut())
         {
             reachedEndOfLife = true;
+            conductor.unavailableCounter(registrationId, counterId());
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;
+    }
+
+    int counterId()
+    {
+        return counter.id();
+    }
+
+    long registrationId()
+    {
+        return registrationId;
     }
 }

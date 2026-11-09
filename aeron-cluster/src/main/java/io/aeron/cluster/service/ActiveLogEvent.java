@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,41 +20,49 @@ package io.aeron.cluster.service;
  */
 class ActiveLogEvent
 {
-    final long leadershipTermId;
     final long logPosition;
     final long maxLogPosition;
     final int memberId;
     final int sessionId;
     final int streamId;
+    final boolean isStartup;
+    final Cluster.Role role;
     final String channel;
+    final boolean isStandby;
 
     ActiveLogEvent(
-        final long leadershipTermId,
         final long logPosition,
         final long maxLogPosition,
         final int memberId,
         final int sessionId,
         final int streamId,
+        final boolean isStartup,
+        final Cluster.Role role,
+        final boolean isStandby,
         final String channel)
     {
-        this.leadershipTermId = leadershipTermId;
         this.logPosition = logPosition;
         this.maxLogPosition = maxLogPosition;
         this.memberId = memberId;
         this.sessionId = sessionId;
         this.streamId = streamId;
+        this.isStartup = isStartup;
+        this.role = role;
         this.channel = channel;
+        this.isStandby = isStandby;
     }
 
     public String toString()
     {
         return "ActiveLogEvent{" +
-            "leadershipTermId=" + leadershipTermId +
             ", logPosition=" + logPosition +
             ", maxLogPosition=" + maxLogPosition +
             ", memberId=" + memberId +
             ", sessionId=" + sessionId +
             ", streamId=" + streamId +
+            ", isStartup=" + isStartup +
+            ", role=" + role +
+            ", isStandby=" + isStandby +
             ", channel='" + channel + '\'' +
             '}';
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,42 +16,28 @@
 
 #include <array>
 #include <cstdint>
+#include <thread>
 
 #include <gtest/gtest.h>
 
 extern "C"
 {
-#include <concurrent/aeron_counters_manager.h>
+#include "concurrent/aeron_counters_manager.h"
 }
 
 #define FREE_TO_REUSE_TIMEOUT_MS (1000L)
 
-static int64_t ms_timestamp = 0;
-
-static int64_t test_epoch_clock()
-{
-    return ms_timestamp;
-}
-
-static int64_t null_epoch_clock()
-{
-    return 0;
-}
-
 class CountersManagerTest : public testing::Test
 {
 public:
-    CountersManagerTest()
-    {
-        ms_timestamp = 0;
-    }
+    CountersManagerTest() = default;
 
-    ~CountersManagerTest()
+    ~CountersManagerTest() override
     {
         aeron_counters_manager_close(&m_manager);
     }
 
-    virtual void SetUp()
+    void SetUp() override
     {
         m_metadata.fill(0);
         m_values.fill(0);
@@ -65,7 +51,7 @@ public:
             m_metadata.size(),
             m_values.data(),
             m_values.size(),
-            null_epoch_clock,
+            &m_cached_clock,
             0);
     }
 
@@ -77,44 +63,97 @@ public:
             m_metadata.size(),
             m_values.data(),
             m_values.size(),
-            test_epoch_clock,
+            &m_cached_clock,
             FREE_TO_REUSE_TIMEOUT_MS);
     }
 
     static const size_t NUM_COUNTERS = 4;
-    std::array<std::uint8_t, NUM_COUNTERS * AERON_COUNTERS_MANAGER_METADATA_LENGTH> m_metadata;
-    std::array<std::uint8_t, NUM_COUNTERS * AERON_COUNTERS_MANAGER_VALUE_LENGTH> m_values;
-    aeron_counters_manager_t m_manager;
+    std::array<std::uint8_t, NUM_COUNTERS * AERON_COUNTERS_MANAGER_METADATA_LENGTH> m_metadata = {};
+    std::array<std::uint8_t, NUM_COUNTERS * AERON_COUNTERS_MANAGER_VALUE_LENGTH> m_values = {};
+    aeron_counters_manager_t m_manager = {};
+    aeron_clock_cache_t m_cached_clock = {};
 };
 
 void func_should_never_be_called(
-    int32_t id, int32_t type_id, const uint8_t *key, size_t key_length, const uint8_t *label, size_t label_length, void *clientd)
+    int32_t id,
+    int32_t type_id,
+    const uint8_t *key,
+    size_t key_length,
+    const uint8_t *label,
+    size_t label_length,
+    void *clientd)
 {
     FAIL();
+}
+
+static void test_concurrent_aeron_counter_increment(
+    int num_threads, size_t iterations, std::atomic<int>& started_threads, int64_t *addr)
+{
+    started_threads++;
+    while (started_threads < num_threads)
+    {
+        std::this_thread::yield();
+    }
+
+    for (size_t j = 0; j < iterations; j++)
+    {
+        aeron_counter_increment(addr);
+    }
+}
+
+static void test_concurrent_aeron_counter_get_and_add(
+    int num_threads, size_t iterations, std::atomic<int>& started_threads, int64_t *addr, int64_t value)
+{
+    started_threads++;
+    while (started_threads < num_threads)
+    {
+        std::this_thread::yield();
+    }
+
+    for (size_t j = 0; j < iterations; j++)
+    {
+        aeron_counter_get_and_add(addr, value);
+    }
 }
 
 TEST_F(CountersManagerTest, shouldNotIterateOverEmptyCounters)
 {
     ASSERT_EQ(counters_manager_init(), 0);
 
-    aeron_counters_reader_foreach(m_metadata.data(), m_metadata.size(), func_should_never_be_called, NULL);
+    aeron_counters_reader_foreach_metadata(m_metadata.data(), m_metadata.size(), func_should_never_be_called, nullptr);
+}
+
+TEST_F(CountersManagerTest, shouldEnsureAlignmentOfKeyLayout)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    size_t counter_key_header_size = (2 * sizeof(int32_t)) + sizeof(int64_t);
+    EXPECT_GE(2u * AERON_CACHE_LINE_LENGTH, sizeof(aeron_stream_position_counter_key_layout_t) + counter_key_header_size);
+    EXPECT_GE(2u * AERON_CACHE_LINE_LENGTH, sizeof(aeron_channel_endpoint_status_key_layout_t) + counter_key_header_size);
+    EXPECT_GE(2u * AERON_CACHE_LINE_LENGTH, sizeof(aeron_local_sockaddr_key_layout_t) + counter_key_header_size);
 }
 
 TEST_F(CountersManagerTest, shouldErrorOnAllocatingWhenFull)
 {
     ASSERT_EQ(counters_manager_init(), 0);
 
-    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "lab0", 4), 0);
-    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "lab1", 4), 0);
-    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "lab2", 4), 0);
-    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "lab3", 4), 0);
-    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "lab4", 4), -1);
+    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "lab0", 4), 0);
+    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "lab1", 4), 0);
+    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "lab2", 4), 0);
+    EXPECT_GE(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "lab3", 4), 0);
+    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "lab4", 4), -1);
 }
 
 void func_check_and_remove_from_map(
-    int32_t id, int32_t type_id, const uint8_t *key, size_t key_length, const uint8_t *label, size_t label_length, void *clientd)
+    int32_t id,
+    int32_t type_id,
+    const uint8_t *key,
+    size_t key_length,
+    const uint8_t *label,
+    size_t label_length,
+    void *clientd)
 {
-    std::map<int32_t, std::string> *allocated = reinterpret_cast<std::map<int32_t, std::string > *>(clientd);
+    auto allocated = reinterpret_cast<std::map<int32_t, std::string> *>(clientd);
 
     ASSERT_EQ(allocated->at(id), std::string((const char *)label, label_length));
     allocated->erase(allocated->find(id));
@@ -129,13 +168,14 @@ TEST_F(CountersManagerTest, shouldAllocateIntoEmptyCounters)
 
     for (auto &label: labels)
     {
-        int32_t id = aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, label.c_str(), label.length());
+        int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, label.c_str(), label.length());
 
         ASSERT_GE(id, 0);
         allocated[id] = label;
     }
 
-    aeron_counters_reader_foreach(m_metadata.data(), m_metadata.size(), func_check_and_remove_from_map, &allocated);
+    aeron_counters_reader_foreach_metadata(
+        m_metadata.data(), m_metadata.size(), func_check_and_remove_from_map, &allocated);
 
     ASSERT_TRUE(allocated.empty());
 }
@@ -148,66 +188,245 @@ TEST_F(CountersManagerTest, shouldRecycleCounterIdWhenFreed)
 
     for (auto &label: labels)
     {
-        ASSERT_GE(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, label.c_str(), label.length()), 0);
+        ASSERT_GE(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, label.c_str(), label.length()), 0);
     }
 
     ASSERT_EQ(aeron_counters_manager_free(&m_manager, 2), 0);
-    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "newLab2", 7), 2);
+    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "newLab2", 7), 2);
 }
 
 TEST_F(CountersManagerTest, shouldFreeAndReuseCounters)
 {
     ASSERT_EQ(counters_manager_init(), 0);
 
-    aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "abc", 3);
-    int32_t def = aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "def", 3);
-    aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "ghi", 3);
+    aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    int32_t def = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "def", 3);
+    aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "ghi", 3);
 
     ASSERT_EQ(aeron_counters_manager_free(&m_manager, def), 0);
-    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "the next label", 14), def);
+    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "the next label", 14), def);
 }
 
 TEST_F(CountersManagerTest, shouldFreeAndNotReuseCountersThatHaveCoolDown)
 {
     ASSERT_EQ(counters_manager_with_cool_down_init(), 0);
 
-    aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "abc", 3);
-    int32_t def = aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "def", 3);
-    int32_t ghi = aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "ghi", 3);
+    aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    int32_t def = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "def", 3);
+    int32_t ghi = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "ghi", 3);
 
     ASSERT_EQ(aeron_counters_manager_free(&m_manager, def), 0);
 
-    ms_timestamp += FREE_TO_REUSE_TIMEOUT_MS - 1;
-    EXPECT_GT(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "the next label", 14), ghi);
+    aeron_clock_update_cached_time(&m_cached_clock, FREE_TO_REUSE_TIMEOUT_MS - 1, 0);
+    EXPECT_GT(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "the next label", 14), ghi);
 }
 
 TEST_F(CountersManagerTest, shouldFreeAndReuseCountersAfterCoolDown)
 {
     ASSERT_EQ(counters_manager_with_cool_down_init(), 0);
 
-    aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "abc", 3);
-    int32_t def = aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "def", 3);
-    aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "ghi", 3);
+    aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    int32_t def = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "def", 3);
+    aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "ghi", 3);
 
     ASSERT_EQ(aeron_counters_manager_free(&m_manager, def), 0);
 
-    ms_timestamp += FREE_TO_REUSE_TIMEOUT_MS;
-    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "the next label", 14), def);
+    aeron_clock_update_cached_time(&m_cached_clock, FREE_TO_REUSE_TIMEOUT_MS, 0);
+    EXPECT_EQ(aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "the next label", 14), def);
 }
 
 TEST_F(CountersManagerTest, shouldStoreAndLoadCounterValue)
 {
     ASSERT_EQ(counters_manager_init(), 0);
 
-    int32_t id = -1;
-
-    ASSERT_GE((id = aeron_counters_manager_allocate(&m_manager, 0, NULL, 0, "abc", 3)), 0);
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
 
     const int64_t value = 7L;
-    int64_t *addr = aeron_counter_addr(&m_manager, id);
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
 
-    aeron_counter_set_ordered(addr, value);
-    EXPECT_EQ(aeron_counter_get(addr), value);
+    aeron_counter_set_release(addr, value);
+    EXPECT_EQ(aeron_counter_get_plain(addr), value);
+    EXPECT_EQ(aeron_counter_get_acquire(addr), value);
+}
+
+TEST_F(CountersManagerTest, shouldIncrementValueWithVolatileSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    int64_t initial_value = 1010101010101;
+    aeron_counter_set_release(addr, initial_value);
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value);
+
+    const int num_threads = 3;
+    const size_t iterations = 777777;
+    std::vector<std::thread> threads;
+    std::atomic<int> started_threads(0);
+    for (int i = 0; i < num_threads; i++)
+    {
+        std::thread x(test_concurrent_aeron_counter_increment, num_threads, iterations, std::ref(started_threads), addr);
+        threads.push_back(std::move(x));
+    }
+
+    for (int i = 0; i < num_threads; i++)
+    {
+        threads[i].join();
+    }
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value + (num_threads * iterations));
+}
+
+TEST_F(CountersManagerTest, shouldIncrementValueWithReleaseSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_increment_release(addr), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 1);
+
+    EXPECT_EQ(aeron_counter_increment_release(addr), 1);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 2);
+}
+
+TEST_F(CountersManagerTest, shouldIncrementValueWithPlainSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_increment_plain(addr), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 1);
+
+    EXPECT_EQ(aeron_counter_increment_plain(addr), 1);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 2);
+}
+
+TEST_F(CountersManagerTest, shouldGetAndAddValueWithVolatileSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    int64_t initial_value = 567;
+    aeron_counter_set_release(addr, initial_value);
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value);
+
+    const int num_threads = 2;
+    const size_t iterations = 777777;
+    std::atomic<int> started_threads(0);
+
+    const int64_t v1 = 19, v2 = 64;
+    std::thread t1(test_concurrent_aeron_counter_get_and_add, num_threads, iterations, std::ref(started_threads), addr, v1);
+    std::thread t2(test_concurrent_aeron_counter_get_and_add, num_threads, iterations, std::ref(started_threads), addr, v2);
+
+    t1.join();
+    t2.join();
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), initial_value + iterations * v1 + iterations * v2);
+}
+
+TEST_F(CountersManagerTest, shouldGetAndAddValueWithReleaseSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_get_and_add_release(addr, 5), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_EQ(aeron_counter_get_and_add_release(addr, -2), 5);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 3);
+
+    EXPECT_EQ(aeron_counter_get_and_add_release(addr, 10), 3);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 13);
+}
+
+TEST_F(CountersManagerTest, shouldGetAndAddValueWithPlainSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_EQ(aeron_counter_get_and_add_plain(addr, 5), 0);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_EQ(aeron_counter_get_and_add_plain(addr, -2), 5);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 3);
+
+    EXPECT_EQ(aeron_counter_get_and_add_plain(addr, 10), 3);
+    EXPECT_EQ(aeron_counter_get_plain(addr), 13);
+}
+
+TEST_F(CountersManagerTest, shouldProposeMaxValueWithReleaseSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_EQ(aeron_counter_get_plain(addr), 0);
+
+    EXPECT_TRUE(aeron_counter_propose_max_release(addr, 5));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_FALSE(aeron_counter_propose_max_release(addr, 5));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_FALSE(aeron_counter_propose_max_release(addr, -1));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 5);
+
+    EXPECT_TRUE(aeron_counter_propose_max_release(addr, 100));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 100);
+}
+
+TEST_F(CountersManagerTest, shouldProposeMaxValueWithPlainSemantics)
+{
+    ASSERT_EQ(counters_manager_init(), 0);
+
+    int32_t id = aeron_counters_manager_allocate(&m_manager, 0, nullptr, 0, "abc", 3);
+    ASSERT_GE(id, 0);
+
+    int64_t *addr = aeron_counters_manager_addr(&m_manager, id);
+
+    EXPECT_TRUE(aeron_counter_propose_max_plain(addr, 111));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 111);
+
+    EXPECT_FALSE(aeron_counter_propose_max_plain(addr, 0));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 111);
+
+    EXPECT_TRUE(aeron_counter_propose_max_plain(addr, 1000));
+    EXPECT_EQ(aeron_counter_get_plain(addr), 1000);
 }
 
 struct metadata_test_stct
@@ -219,9 +438,14 @@ struct metadata_test_stct
 };
 
 void func_should_store_metadata(
-    int32_t id, int32_t type_id, const uint8_t *key, size_t key_length, const uint8_t *label, size_t label_length, void *clientd)
+    int32_t id, int32_t type_id,
+    const uint8_t *key,
+    size_t key_length,
+    const uint8_t *label,
+    size_t label_length,
+    void *clientd)
 {
-    struct metadata_test_stct *info = reinterpret_cast<struct metadata_test_stct *>(clientd);
+    auto *info = reinterpret_cast<struct metadata_test_stct *>(clientd);
     static size_t times_called = 0;
 
     ASSERT_LT(times_called, 2u);
@@ -267,5 +491,5 @@ TEST_F(CountersManagerTest, shouldStoreMetaData)
             info[1].label.length()),
         info[1].counter_id);
 
-    aeron_counters_reader_foreach(m_metadata.data(), m_metadata.size(), func_should_store_metadata, info);
+    aeron_counters_reader_foreach_metadata(m_metadata.data(), m_metadata.size(), func_should_store_metadata, info);
 }

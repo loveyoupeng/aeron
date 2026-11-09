@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,8 @@ import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
 /**
  * Flyweight for Data Frame header of a message fragment.
  * <p>
- * <a target="_blank" href="https://github.com/real-logic/aeron/wiki/Protocol-Specification#data-frame">Data Frame</a>
+ * <a target="_blank"
+ * href="https://github.com/aeron-io/aeron/wiki/Transport-Protocol-Specification#data-frame">Data Frame</a>
  * wiki page.
  */
 public class DataHeaderFlyweight extends HeaderFlyweight
@@ -61,24 +62,73 @@ public class DataHeaderFlyweight extends HeaderFlyweight
      */
     public static final short BEGIN_END_AND_EOS_FLAGS = BEGIN_FLAG | END_FLAG | EOS_FLAG;
 
+    /**
+     * (R) - Revoked Flag for heartbeats after the publication is revoked.
+     */
+    public static final short REVOKED_FLAG = 0x10;
+
+    /**
+     * Begin, End, EOS, and Revoked Flags.
+     */
+    public static final short BEGIN_END_EOS_AND_REVOKED_FLAGS = BEGIN_FLAG | END_FLAG | EOS_FLAG | REVOKED_FLAG;
+
+    /**
+     * Default value to be placed in the reserved value field.
+     */
     public static final long DEFAULT_RESERVE_VALUE = 0L;
 
+    /**
+     * Offset in the frame at which the term-offset field begins.
+     */
     public static final int TERM_OFFSET_FIELD_OFFSET = 8;
+
+    /**
+     * Offset in the frame at which the session-id field begins.
+     */
     public static final int SESSION_ID_FIELD_OFFSET = 12;
+
+    /**
+     * Offset in the frame at which the stream-id field begins.
+     */
     public static final int STREAM_ID_FIELD_OFFSET = 16;
+
+    /**
+     * Offset in the frame at which the term-id field begins.
+     */
     public static final int TERM_ID_FIELD_OFFSET = 20;
+
+    /**
+     * Offset in the frame at which the reserved value field begins.
+     */
     public static final int RESERVED_VALUE_OFFSET = 24;
+
+    /**
+     * Offset in the frame at which the data payload begins.
+     */
     public static final int DATA_OFFSET = HEADER_LENGTH;
 
+    /**
+     * Default constructor which can later be used to wrap a frame.
+     */
     public DataHeaderFlyweight()
     {
     }
 
+    /**
+     * Construct the flyweight over a frame.
+     *
+     * @param buffer containing the frame.
+     */
     public DataHeaderFlyweight(final UnsafeBuffer buffer)
     {
         super(buffer);
     }
 
+    /**
+     * Construct the flyweight over a frame.
+     *
+     * @param buffer containing the frame.
+     */
     public DataHeaderFlyweight(final ByteBuffer buffer)
     {
         super(buffer);
@@ -87,7 +137,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     /**
      * Get the fragment length field from the header.
      *
-     * @param termBuffer  container the header.
+     * @param termBuffer  containing the header.
      * @param frameOffset in the buffer where the header starts.
      * @return the fragment length field from the header.
      */
@@ -105,7 +155,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
      */
     public static boolean isHeartbeat(final UnsafeBuffer packet, final int length)
     {
-        return length == HEADER_LENGTH && packet.getInt(0) == 0;
+        return HEADER_LENGTH == length && 0 == packet.getInt(FRAME_LENGTH_FIELD_OFFSET, LITTLE_ENDIAN);
     }
 
     /**
@@ -116,7 +166,18 @@ public class DataHeaderFlyweight extends HeaderFlyweight
      */
     public static boolean isEndOfStream(final UnsafeBuffer packet)
     {
-        return BEGIN_END_AND_EOS_FLAGS == (packet.getByte(FLAGS_FIELD_OFFSET) & 0xFF);
+        return 0 != (packet.getByte(FLAGS_FIELD_OFFSET) & EOS_FLAG);
+    }
+
+    /**
+     * Does the data frame in the packet have the REVOKED flag set?
+     *
+     * @param packet containing the data frame
+     * @return true if the REVOKED flag is set otherwise false.
+     */
+    public static boolean isRevoked(final UnsafeBuffer packet)
+    {
+        return 0 != (packet.getByte(FLAGS_FIELD_OFFSET) & REVOKED_FLAG);
     }
 
     /**
@@ -132,7 +193,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     /**
      * Get the session-id field from the header.
      *
-     * @param termBuffer  container the header.
+     * @param termBuffer  containing the header.
      * @param frameOffset in the buffer where the header starts.
      * @return the session-id field from the header.
      */
@@ -167,7 +228,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     /**
      * Get the stream-id field from the header.
      *
-     * @param termBuffer  container the header.
+     * @param termBuffer  containing the header.
      * @param frameOffset in the buffer where the header starts.
      * @return the stream-id field from the header.
      */
@@ -177,7 +238,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Set the session-id field in the header.
+     * Set the stream-id field in the header.
      *
      * @param streamId value to set.
      * @return this for a fluent API.
@@ -202,7 +263,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     /**
      * Get the term-id field from the header.
      *
-     * @param termBuffer  container the header.
+     * @param termBuffer  containing the header.
      * @param frameOffset in the buffer where the header starts.
      * @return the term-id field from the header.
      */
@@ -237,7 +298,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     /**
      * Get the term-offset field from the header.
      *
-     * @param termBuffer  container the header.
+     * @param termBuffer  containing the header.
      * @param frameOffset in the buffer where the header starts.
      * @return the term-offset field from the header.
      */
@@ -272,7 +333,7 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     /**
      * Get the reserved value field from the header.
      *
-     * @param termBuffer  container the header.
+     * @param termBuffer  containing the header.
      * @param frameOffset in the buffer where the header starts.
      * @return the reserved value field from the header.
      */
@@ -295,9 +356,9 @@ public class DataHeaderFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Return offset in buffer for data
+     * Return offset in buffer for data.
      *
-     * @return offset of data in the buffer
+     * @return offset of data in the buffer.
      */
     public int dataOffset()
     {
@@ -328,6 +389,10 @@ public class DataHeaderFlyweight extends HeaderFlyweight
         return buffer;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "DATA Header{" +

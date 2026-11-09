@@ -1,24 +1,32 @@
 Aeron Cluster
 ===
 
-**Note:** Aeron Cluster is currently an experimental feature.
+[![Javadocs](http://www.javadoc.io/badge/io.aeron/aeron-all.svg)](http://www.javadoc.io/doc/io.aeron/aeron-all)
 
-The purpose of Aeron Cluster is to aggregate and sequence streams from cluster clients into a single log which is
-replicated and archived on a number of nodes to achieve resilience. Cluster services process this log and respond
-to cluster clients.
+Aeron Cluster provides support for fault-tolerant services as replicated state machines based on the 
+[Raft](https://raft.github.io/) consensus algorithm.
 
-Aeron Cluster works on the concept of a strong leader using an adaptation of the [Raft](https://raft.github.io/raft.pdf)
-protocol. The leader sequences the log and is responsible for replicating it to other cluster members known as
-followers.
+The purpose of Aeron Cluster is to aggregate and sequence streams from cluster clients into a single log. A number of
+nodes will replicate and archive the log to achieve fault tolerance. Cluster services deterministically process the log
+and respond to cluster clients.
 
-Aeron Cluster is composed of a number of components. Central is the Consensus Module which sequences the log and
-coordinates consensus on the recording of the sequenced log to persistent storage, and the services consuming the log
-across cluster members. Recording of the log to persistent storage is performed by the Aeron Archive module. Services
-are allowed to consume the log once a majority of the cluster members have safely recorded the log to persistent storage.
+Aeron Cluster works on the concept of a strong leader. The leader sequences the log and is responsible for replicating
+the log to other cluster members known as followers.
 
-To enable fast recovery the services and consensus module can take a snapshot of their state as of a given log position
-thus enabling recovery by loading the most recent snapshot and replaying logs from that point forward. Snapshots are
-recorded as streams in the Archive for local and remote replay so that a distributed file system is not required.
+A number of components make up Aeron Cluster. Central is the Consensus Module which sequences the log and
+coordinates consensus for the recording of the sequenced log to persistent storage, and the services consuming the log
+across cluster members. Aeron Archive records the log to durable storage. Services consume the log once a majority of
+the cluster members have safely recorded the log to durable storage.
+
+To enable fast recovery, the services and consensus module can take a snapshots of their state as of a given log
+position. Snapshots enable recovery by loading the most recent snapshot and replaying logs from that point forward.
+The Archive records snapshots for local, and remote, replay thus avoiding the need for a distributed
+file system.
+
+Unique features to Aeron Cluster include support for reliable distributed timers, inter-service messaging, remote data
+centre backup, and unparalleled performance.
+
+[Cluster Tutorial](https://github.com/aeron-io/aeron/wiki/Cluster-Tutorial) is a good place to start.
 
 Usage
 =====
@@ -27,17 +35,17 @@ The cluster can run in various configurations:
 
  - **Single Node:** For development, debugging, or when a sequenced and archived log on a single node is sufficient.
  - **Appointed Leader:** A leader of the cluster can be appointed via configuration without requiring an election.
-    In the event of a leader failure then a follower will have to be manually appointed the new leader.
- - **Automatic Elections:** Automatic elections can be enabled to have a leader elected at random from the members with
-    with the most up to date log.
- - **Dynamic Membership:** Cluster node membership can be dynamic with support for members to join and quit the cluster
-    with membership changes recorded in the log.
+    In the event of a leader failure then a follower will have to be manually appointed the new leader. This is not the
+    recommended way to use Cluster. Automatic elections are more reliable.
+ - **Automatic Elections:** Automatic elections (default) can be enabled to have a leader elected at random from the
+    members with the most up-to-date log.
        
-Based on the membership size, consensus is determined by the majority of the cluster members. It is recommended that
-clusters be 3 or 5 in population size. However 2 node clusters are supported whereby both members must agree the log 
-and in the event of failure the remaining member must be manually reconfigured as a single node cluster.
+The majority of cluster members determine consensus. Clusters should typically be 3 or 5 in population size. However,
+2 node clusters are supported whereby both members must agree the log and in the event of failure the remaining member
+must be manually reconfigured as a single node cluster to progress.
 
-Protocol
+Aeron Cluster Protocol
 =====
 
-Messages are specified using SBE in [aeron-cluster-codecs.xml](https://github.com/real-logic/aeron/blob/master/aeron-cluster/src/main/resources/aeron-cluster-codecs.xml).
+Messages are specified using [SBE](https://github.com/aeron-io/simple-binary-encoding) in this schema
+[aeron-cluster-codecs.xml](https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/resources/cluster/aeron-cluster-codecs.xml).

@@ -1,19 +1,33 @@
+/*
+ * Copyright 2014-2025 Real Logic Limited.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package io.aeron.logbuffer;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.concurrent.UnsafeBuffer;
 
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.*;
 import static io.aeron.logbuffer.FrameDescriptor.*;
 import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_DATA;
 import static org.agrona.BitUtil.align;
 
-public class TermScannerTest
+class TermScannerTest
 {
     private static final int TERM_BUFFER_CAPACITY = LogBufferDescriptor.TERM_MIN_LENGTH;
     private static final int MTU_LENGTH = 1024;
@@ -21,34 +35,34 @@ public class TermScannerTest
 
     private final UnsafeBuffer termBuffer = mock(UnsafeBuffer.class);
 
-    @Before
-    public void setUp()
+    @BeforeEach
+    void setUp()
     {
         when(termBuffer.capacity()).thenReturn(TERM_BUFFER_CAPACITY);
     }
 
     @Test
-    public void shouldPackPaddingAndOffsetIntoResultingStatus()
+    void shouldPackPaddingAndOffsetIntoResultingStatus()
     {
         final int padding = 77;
         final int available = 65000;
 
         final long scanOutcome = TermScanner.pack(padding, available);
 
-        assertThat(TermScanner.padding(scanOutcome), is(padding));
-        assertThat(TermScanner.available(scanOutcome), is(available));
+        assertEquals(padding, TermScanner.padding(scanOutcome));
+        assertEquals(available, TermScanner.available(scanOutcome));
     }
 
     @Test
-    public void shouldReturnZeroOnEmptyLog()
+    void shouldReturnZeroOnEmptyLog()
     {
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, 0, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(0));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(0, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
     }
 
     @Test
-    public void shouldScanSingleMessage()
+    void shouldScanSingleMessage()
     {
         final int msgLength = 1;
         final int frameLength = HEADER_LENGTH + msgLength;
@@ -59,8 +73,8 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset))).thenReturn((short)HDR_TYPE_DATA);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(alignedFrameLength));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(alignedFrameLength, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
 
         final InOrder inOrder = inOrder(termBuffer);
         inOrder.verify(termBuffer).getIntVolatile(frameOffset);
@@ -68,7 +82,7 @@ public class TermScannerTest
     }
 
     @Test
-    public void shouldFailToScanMessageLargerThanMaxLength()
+    void shouldFailToScanMessageLargerThanMaxLength()
     {
         final int msgLength = 1;
         final int frameLength = HEADER_LENGTH + msgLength;
@@ -80,8 +94,8 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset))).thenReturn((short)HDR_TYPE_DATA);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, maxLength);
-        assertThat(TermScanner.available(scanOutcome), is(0));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(-alignedFrameLength, TermScanner.available(scanOutcome));
+        assertEquals(-1, TermScanner.padding(scanOutcome));
 
         final InOrder inOrder = inOrder(termBuffer);
         inOrder.verify(termBuffer).getIntVolatile(frameOffset);
@@ -89,7 +103,7 @@ public class TermScannerTest
     }
 
     @Test
-    public void shouldScanTwoMessagesThatFitInSingleMtu()
+    void shouldScanTwoMessagesThatFitInSingleMtu()
     {
         final int msgLength = 100;
         final int frameLength = HEADER_LENGTH + msgLength;
@@ -102,8 +116,8 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset + alignedFrameLength))).thenReturn((short)HDR_TYPE_DATA);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(alignedFrameLength * 2));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(alignedFrameLength * 2, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
 
         final InOrder inOrder = inOrder(termBuffer);
         inOrder.verify(termBuffer).getIntVolatile(frameOffset);
@@ -115,7 +129,7 @@ public class TermScannerTest
     }
 
     @Test
-    public void shouldScanTwoMessagesAndStopAtMtuBoundary()
+    void shouldScanTwoMessagesAndStopAtMtuBoundary()
     {
         final int frameTwoLength = align(HEADER_LENGTH + 1, FRAME_ALIGNMENT);
         final int frameOneLength = MTU_LENGTH - frameTwoLength;
@@ -128,8 +142,8 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset + frameOneLength))).thenReturn((short)HDR_TYPE_DATA);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(frameOneLength + frameTwoLength));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(frameOneLength + frameTwoLength, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
 
         final InOrder inOrder = inOrder(termBuffer);
         inOrder.verify(termBuffer).getIntVolatile(frameOffset);
@@ -141,7 +155,7 @@ public class TermScannerTest
     }
 
     @Test
-    public void shouldScanTwoMessagesAndStopAtSecondThatSpansMtu()
+    void shouldScanTwoMessagesAndStopAtSecondThatSpansMtu()
     {
         final int frameTwoLength = align(HEADER_LENGTH * 2, FRAME_ALIGNMENT);
         final int frameOneLength = MTU_LENGTH - (frameTwoLength / 2);
@@ -153,8 +167,8 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset + frameOneLength))).thenReturn((short)HDR_TYPE_DATA);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(frameOneLength));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(frameOneLength, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
 
         final InOrder inOrder = inOrder(termBuffer);
         inOrder.verify(termBuffer).getIntVolatile(frameOffset);
@@ -166,7 +180,7 @@ public class TermScannerTest
     }
 
     @Test
-    public void shouldScanLastFrameInBuffer()
+    void shouldScanLastFrameInBuffer()
     {
         final int alignedFrameLength = align(HEADER_LENGTH * 2, FRAME_ALIGNMENT);
         final int frameOffset = TERM_BUFFER_CAPACITY - alignedFrameLength;
@@ -175,12 +189,12 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset))).thenReturn((short)HDR_TYPE_DATA);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(alignedFrameLength));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(alignedFrameLength, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
     }
 
     @Test
-    public void shouldScanLastMessageInBufferPlusPadding()
+    void shouldScanLastMessageInBufferPlusPadding()
     {
         final int alignedFrameLength = align(HEADER_LENGTH * 2, FRAME_ALIGNMENT);
         final int paddingFrameLength = align(HEADER_LENGTH * 3, FRAME_ALIGNMENT);
@@ -192,12 +206,12 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset + alignedFrameLength))).thenReturn((short)PADDING_FRAME_TYPE);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, MTU_LENGTH);
-        assertThat(TermScanner.available(scanOutcome), is(alignedFrameLength + HEADER_LENGTH));
-        assertThat(TermScanner.padding(scanOutcome), is(paddingFrameLength - HEADER_LENGTH));
+        assertEquals(alignedFrameLength + HEADER_LENGTH, TermScanner.available(scanOutcome));
+        assertEquals(paddingFrameLength - HEADER_LENGTH, TermScanner.padding(scanOutcome));
     }
 
     @Test
-    public void shouldScanLastMessageInBufferMinusPaddingLimitedByMtu()
+    void shouldScanLastMessageInBufferMinusPaddingLimitedByMtu()
     {
         final int alignedFrameLength = align(HEADER_LENGTH, FRAME_ALIGNMENT);
         final int frameOffset = TERM_BUFFER_CAPACITY - align(HEADER_LENGTH * 3, FRAME_ALIGNMENT);
@@ -209,7 +223,7 @@ public class TermScannerTest
         when(termBuffer.getShort(typeOffset(frameOffset + alignedFrameLength))).thenReturn((short)PADDING_FRAME_TYPE);
 
         final long scanOutcome = TermScanner.scanForAvailability(termBuffer, frameOffset, mtu);
-        assertThat(TermScanner.available(scanOutcome), is(alignedFrameLength));
-        assertThat(TermScanner.padding(scanOutcome), is(0));
+        assertEquals(alignedFrameLength, TermScanner.available(scanOutcome));
+        assertEquals(0, TermScanner.padding(scanOutcome));
     }
 }

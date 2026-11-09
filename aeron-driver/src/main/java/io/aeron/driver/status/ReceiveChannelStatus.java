@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,30 +15,47 @@
  */
 package io.aeron.driver.status;
 
+import io.aeron.AeronCounters;
 import io.aeron.status.ChannelEndpointStatus;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 
 /**
- * The status of a receive channel endpoint represented as a counter value.
+ * The status of a receiving channel endpoint represented as a counter value.
  */
-public class ReceiveChannelStatus
+public final class ReceiveChannelStatus
 {
     /**
      * Type id of a receive channel status indicator.
      */
-    public static final int RECEIVE_CHANNEL_STATUS_TYPE_ID = 7;
+    public static final int RECEIVE_CHANNEL_STATUS_TYPE_ID = AeronCounters.DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID;
 
     /**
-     * Human readable name for the counter.
+     * Human-readable name for the counter.
      */
     public static final String NAME = "rcv-channel";
 
+    private ReceiveChannelStatus()
+    {
+    }
+
+    /**
+     * Allocate a new channel status counter for a stream.
+     *
+     * @param tempBuffer      to build the label.
+     * @param countersManager to allocate the counter from.
+     * @param registrationId  associated with the counter.
+     * @param channel         associated with the counter.
+     * @return the allocated counter.
+     */
     public static AtomicCounter allocate(
-        final MutableDirectBuffer tempBuffer, final CountersManager countersManager, final String channel)
+        final MutableDirectBuffer tempBuffer,
+        final CountersManager countersManager,
+        final long registrationId,
+        final String channel)
     {
         return ChannelEndpointStatus.allocate(
-            tempBuffer, NAME, RECEIVE_CHANNEL_STATUS_TYPE_ID, countersManager, channel);
+            tempBuffer, NAME, RECEIVE_CHANNEL_STATUS_TYPE_ID, countersManager, registrationId, channel);
     }
 }

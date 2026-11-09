@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,42 +17,65 @@ package io.aeron;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
-import org.agrona.CloseHelper;
-import org.agrona.DirectBuffer;
-import org.junit.After;
-import org.junit.Test;
-import org.mockito.ArgumentCaptor;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.mockito.ArgumentCaptor;
 
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
+import java.util.concurrent.atomic.AtomicLong;
+
+import static io.aeron.AeronCounters.DRIVER_RECEIVER_HWM_TYPE_ID;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.*;
 
-public class MultiSubscriberTest
+@ExtendWith(InterruptingTestCallback.class)
+class MultiSubscriberTest
 {
-    private static final String CHANNEL_1 = "aeron:udp?endpoint=localhost:54325|fruit=banana";
-    private static final String CHANNEL_2 = "aeron:udp?endpoint=localhost:54325|fruit=apple";
-    private static final int STREAM_ID = 1;
+    private static final String CHANNEL_1 = "aeron:udp?endpoint=localhost:24325|fruit=banana";
+    private static final String CHANNEL_2 = "aeron:udp?endpoint=localhost:24325|fruit=apple";
+    private static final String CHANNEL_3 = "aeron:udp?endpoint=localhost:24326|fruit=apple";
+    private static final int STREAM_ID = 1001;
     private static final int FRAGMENT_COUNT_LIMIT = 10;
 
-    private final MediaDriver driver = MediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnShutdown(true)
-        .threadingMode(ThreadingMode.SHARED));
+    @RegisterExtension
+    final SystemTestWatcher watcher = new SystemTestWatcher();
+
+    private final MediaDriver.Context context = new MediaDriver.Context()
+        .errorHandler(Tests::onError)
+        .threadingMode(ThreadingMode.SHARED);
+    private final TestMediaDriver driver = TestMediaDriver.launch(context, watcher);
 
     private final Aeron aeron = Aeron.connect();
 
-    @After
-    public void after()
+    @BeforeEach
+    void setUp()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        watcher.dataCollector().add(driver.context().aeronDirectory());
     }
 
-    @Test(timeout = 10_000)
-    public void shouldReceiveMessageOnSeparateSubscriptions()
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldReceiveMessageOnSeparateSubscriptions()
     {
         final FragmentHandler mockFragmentHandlerOne = mock(FragmentHandler.class);
         final FragmentHandler mockFragmentHandlerTwo = mock(FragmentHandler.class);
@@ -67,35 +90,83 @@ public class MultiSubscriberTest
             final byte[] expectedBytes = "Hello, World! here is a small message".getBytes();
             final UnsafeBuffer srcBuffer = new UnsafeBuffer(expectedBytes);
 
-            assertThat(subscriptionOne.poll(adapterOne, FRAGMENT_COUNT_LIMIT), is(0));
-            assertThat(subscriptionTwo.poll(adapterTwo, FRAGMENT_COUNT_LIMIT), is(0));
+            assertEquals(0, subscriptionOne.poll(adapterOne, FRAGMENT_COUNT_LIMIT));
+            assertEquals(0, subscriptionTwo.poll(adapterTwo, FRAGMENT_COUNT_LIMIT));
 
             while (!subscriptionOne.isConnected() || !subscriptionTwo.isConnected())
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             while (publication.offer(srcBuffer) < 0L)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             while (subscriptionOne.poll(adapterOne, FRAGMENT_COUNT_LIMIT) == 0)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             while (subscriptionTwo.poll(adapterTwo, FRAGMENT_COUNT_LIMIT) == 0)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             verifyData(srcBuffer, mockFragmentHandlerOne);
             verifyData(srcBuffer, mockFragmentHandlerTwo);
+        }
+    }
+
+    @Test
+    @InterruptAfter(5)
+    void shouldReportDifferentUriForEachSubscription()
+    {
+        final AtomicLong subAImageCorrelationId = new AtomicLong(-1);
+        final AtomicLong subBImageCorrelationId = new AtomicLong(-1);
+        final String channel = "aeron:udp?endpoint=localhost:24325";
+        final String channelA = channel + "|reliable=false";
+        final String channelB = channel + "|reliable=true";
+
+        try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
+            Publication publication1 = aeron.addPublication(channel, STREAM_ID);
+            Publication publication2 = aeron.addPublication(channel, STREAM_ID + 1);
+            Subscription subA = aeron.addSubscription(
+                channelA,
+                STREAM_ID,
+                image -> subAImageCorrelationId.set(image.correlationId()),
+                image -> {});
+            Subscription subB = aeron.addSubscription(
+                channelB,
+                STREAM_ID + 1,
+                image -> subBImageCorrelationId.set(image.correlationId()),
+                image -> {}))
+        {
+            Tests.awaitConnected(publication1);
+            Tests.awaitConnected(publication2);
+            Tests.awaitConnected(subA);
+            Tests.awaitConnected(subB);
+
+            while (-1 == subAImageCorrelationId.get() && -1 == subBImageCorrelationId.get())
+            {
+                Tests.yield();
+            }
+
+            int counterIdA;
+            while (-1 == (counterIdA = aeron.countersReader()
+                .findByTypeIdAndRegistrationId(DRIVER_RECEIVER_HWM_TYPE_ID, subAImageCorrelationId.get())))
+            {
+                Tests.yield();
+            }
+            assertThat(aeron.countersReader().getCounterLabel(counterIdA), containsString(channelA));
+
+            int counterIdB;
+            while (-1 == (counterIdB = aeron.countersReader()
+                .findByTypeIdAndRegistrationId(DRIVER_RECEIVER_HWM_TYPE_ID, subBImageCorrelationId.get())))
+            {
+                Tests.yield();
+            }
+            assertThat(aeron.countersReader().getCounterLabel(counterIdB), containsString(channelB));
         }
     }
 
@@ -112,7 +183,7 @@ public class MultiSubscriberTest
         for (int i = 0; i < srcBuffer.capacity(); i++)
         {
             final int index = offset + i;
-            assertThat("same at " + index, capturedBuffer.getByte(index), is(srcBuffer.getByte(i)));
+            assertEquals(srcBuffer.getByte(i), capturedBuffer.getByte(index), "same at " + index);
         }
     }
 }

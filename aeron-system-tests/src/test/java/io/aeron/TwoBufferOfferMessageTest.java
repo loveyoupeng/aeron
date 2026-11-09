@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,38 +18,59 @@ package io.aeron;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.FragmentHandler;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.collections.MutableReference;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class TwoBufferOfferMessageTest
+@ExtendWith(InterruptingTestCallback.class)
+class TwoBufferOfferMessageTest
 {
-    public static final String CHANNEL = "aeron:ipc?term-length=64k";
-
-    private static final int STREAM_ID = 1;
+    private static final String CHANNEL = "aeron:ipc?term-length=64k";
+    private static final int STREAM_ID = 1001;
     private static final int FRAGMENT_COUNT_LIMIT = 10;
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnShutdown(true)
-        .threadingMode(ThreadingMode.SHARED));
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final Aeron aeron = Aeron.connect();
+    private final MediaDriver.Context driverContext = new MediaDriver.Context()
+        .errorHandler(Tests::onError)
+        .dirDeleteOnStart(true)
+        .threadingMode(ThreadingMode.SHARED);
 
-    @After
-    public void after()
+    private TestMediaDriver driver;
+
+    private Aeron aeron;
+
+    @BeforeEach
+    void setUp()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        driver = TestMediaDriver.launch(driverContext, testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldTransferUnfragmentedTwoPartMessage()
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldTransferUnfragmentedTwoPartMessage()
     {
         final UnsafeBuffer expectedBuffer = new UnsafeBuffer(new byte[256]);
         final UnsafeBuffer bufferOne = new UnsafeBuffer(expectedBuffer, 0, 32);
@@ -83,8 +104,9 @@ public class TwoBufferOfferMessageTest
         }
     }
 
-    @Test(timeout = 10_000)
-    public void shouldTransferFragmentedTwoPartMessage()
+    @Test
+    @InterruptAfter(10)
+    void shouldTransferFragmentedTwoPartMessage()
     {
         final UnsafeBuffer expectedBuffer = new UnsafeBuffer(new byte[32 + driver.context().mtuLength()]);
         final UnsafeBuffer bufferOne = new UnsafeBuffer(expectedBuffer, 0, 32);
@@ -123,8 +145,7 @@ public class TwoBufferOfferMessageTest
     {
         while (publication.offer(bufferOne, 0, bufferOne.capacity(), bufferTwo, 0, bufferTwo.capacity()) < 0L)
         {
-            Thread.yield();
-            SystemTest.checkInterruptedStatus();
+            Tests.yield();
         }
     }
 
@@ -138,8 +159,7 @@ public class TwoBufferOfferMessageTest
             final int fragments = subscription.poll(handler, FRAGMENT_COUNT_LIMIT);
             if (fragments == 0)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
         }
     }

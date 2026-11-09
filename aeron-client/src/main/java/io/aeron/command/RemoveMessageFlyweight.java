@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@
  */
 package io.aeron.command;
 
-import io.aeron.ErrorCode;
 import io.aeron.exceptions.ControlProtocolException;
+import org.agrona.MutableDirectBuffer;
 
+import static io.aeron.ErrorCode.MALFORMED_COMMAND;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
@@ -37,34 +38,62 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  *  +---------------------------------------------------------------+
  * </pre>
  */
-public class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
+public abstract class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
 {
-    private static final int REGISTRATION_ID_OFFSET = CORRELATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
-    private static final int MINIMUM_LENGTH = REGISTRATION_ID_OFFSET + SIZE_OF_LONG;
+    static final int REGISTRATION_ID_FIELD_OFFSET = CORRELATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
+    private static final int MINIMUM_LENGTH = REGISTRATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
 
     /**
-     * Get the registration id field
+     * An empty flyweight, which should be wrapped over a buffer.
      *
-     * @return registration id field
+     * @see #wrap(MutableDirectBuffer, int)
      */
-    public long registrationId()
+    public RemoveMessageFlyweight()
     {
-        return buffer.getLong(offset + REGISTRATION_ID_OFFSET);
     }
 
     /**
-     * Set registration id field
+     * Wrap the buffer at a given offset for updates.
      *
-     * @param registrationId field value
-     * @return flyweight
+     * @param buffer to wrap.
+     * @param offset at which the message begins.
+     * @return this for a fluent API.
      */
-    public RemoveMessageFlyweight registrationId(final long registrationId)
+    public RemoveMessageFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
-        buffer.putLong(offset + REGISTRATION_ID_OFFSET, registrationId);
+        super.wrap(buffer, offset);
 
         return this;
     }
 
+    /**
+     * Get the registration id field.
+     *
+     * @return registration id field.
+     */
+    public long registrationId()
+    {
+        return buffer.getLong(offset + REGISTRATION_ID_FIELD_OFFSET);
+    }
+
+    /**
+     * Set registration id field.
+     *
+     * @param registrationId field value.
+     * @return this for a fluent API.
+     */
+    public RemoveMessageFlyweight registrationId(final long registrationId)
+    {
+        buffer.putLong(offset + REGISTRATION_ID_FIELD_OFFSET, registrationId);
+
+        return this;
+    }
+
+    /**
+     * Length of the message in bytes.
+     *
+     * @return length of the message in bytes.
+     */
     public static int length()
     {
         return LENGTH + SIZE_OF_LONG;
@@ -81,7 +110,7 @@ public class RemoveMessageFlyweight extends CorrelatedMessageFlyweight
         if (length < MINIMUM_LENGTH)
         {
             throw new ControlProtocolException(
-                ErrorCode.MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
+                MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
         }
     }
 }

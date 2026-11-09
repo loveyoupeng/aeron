@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,28 @@ import java.net.InetSocketAddress;
  */
 public class StaticWindowCongestionControl implements CongestionControl
 {
+    /**
+     * URI param value to identify this {@link CongestionControl} strategy.
+     */
+    public static final String CC_PARAM_VALUE = "static";
+
     private final long ccOutcome;
 
+    /**
+     * Construct a new {@link CongestionControl} instance for a received stream image using a static window algorithm.
+     *
+     * @param registrationId  for the publication image.
+     * @param udpChannel      for the publication image.
+     * @param streamId        for the publication image.
+     * @param sessionId       for the publication image.
+     * @param termLength      for the publication image.
+     * @param senderMtuLength for the publication image.
+     * @param controlAddress  for the publication image.
+     * @param sourceAddress   for the publication image.
+     * @param nanoClock       for the precise timing.
+     * @param context         for configuration options applied in the driver.
+     * @param countersManager for the driver.
+     */
     public StaticWindowCongestionControl(
         final long registrationId,
         final UdpChannel udpChannel,
@@ -38,30 +58,54 @@ public class StaticWindowCongestionControl implements CongestionControl
         final int senderMtuLength,
         final InetSocketAddress controlAddress,
         final InetSocketAddress sourceAddress,
-        final NanoClock clock,
+        final NanoClock nanoClock,
         final MediaDriver.Context context,
         final CountersManager countersManager)
     {
-        ccOutcome = CongestionControl.packOutcome(Math.min(termLength >> 1, context.initialWindowLength()), false);
+        final int initialWindowLength = udpChannel.receiverWindowLength() != 0 ?
+            udpChannel.receiverWindowLength() : context.initialWindowLength();
+
+        ccOutcome = CongestionControl.packOutcome(
+            Configuration.receiverWindowLength(termLength, initialWindowLength), false);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean shouldMeasureRtt(final long nowNs)
     {
         return false;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onRttMeasurementSent(final long nowNs)
     {
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onRttMeasurement(final long nowNs, final long rttNs, final InetSocketAddress srcAddress)
     {
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long onTrackRebuild(
         final long nowNs,
         final long newConsumptionPosition,
@@ -74,7 +118,20 @@ public class StaticWindowCongestionControl implements CongestionControl
         return ccOutcome;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public int initialWindowLength()
+    {
+        return CongestionControl.receiverWindowLength(ccOutcome);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int maxWindowLength()
     {
         return CongestionControl.receiverWindowLength(ccOutcome);
     }

@@ -1,13 +1,13 @@
 # Aeron Archive Samples
 
-The scripts in this directory can launch the sample applications for the [Aeron Archive](https://github.com/real-logic/aeron/tree/master/aeron-archive) service with the code samples
-[here](https://github.com/real-logic/aeron/tree/master/aeron-samples/src/main/java/io/aeron/samples/archive) and
-systems tests [here](https://github.com/real-logic/aeron/tree/master/aeron-system-tests/src/test/java/io/aeron/archive).
+The scripts in this directory can launch the sample applications for the [Aeron Archive](https://github.com/aeron-io/aeron/tree/master/aeron-archive) service with the code samples
+[here](https://github.com/aeron-io/aeron/tree/master/aeron-samples/src/main/java/io/aeron/samples/archive) and
+systems tests [here](https://github.com/aeron-io/aeron/tree/master/aeron-system-tests/src/test/java/io/aeron/archive).
 
 ## Embedded Throughput Samples
 
 Suitable for measuring IO performance of your system. The samples will default to creating
-an archive directory on the the temporary file system. It is recommended that a properties file is provided
+an archive directory on the temporary file system. It is recommended that a properties file is provided
 by passing it as argument to the script. The `aeron.archive.dir` property should be located on fast storage.
 
 ### Recording Throughput
@@ -44,7 +44,7 @@ It is worth playing with different messages lengths and threading configurations
 ```
     
 
-3. Start a normal subscriber so the publication connects and can record.
+3. Start a normal subscriber so that the publication connects and can record.
 
 ```
     $ cd ..
@@ -57,7 +57,7 @@ It is worth playing with different messages lengths and threading configurations
     $ replay-basic-subscriber <config properties file>
 ```
 
-5. Optionally run AeronStat an observe status, look out for the `rec-pos` counter for the recorded stream. 
+5. Optionally run AeronStat and observe status, look out for the `rec-pos` counter for the recorded stream. 
   
 ```
     $ aeron-stat
@@ -68,4 +68,66 @@ It is worth playing with different messages lengths and threading configurations
 ```
     $ error-stat
 ```
- 
+
+## ReplayMerge
+
+1. Start the archiving media driver in its own terminal.
+
+```shell
+./archiving-media-driver
+```
+
+2. Start an MDC or multicast publisher with its recorded publication in another terminal.
+
+```shell
+export JVM_OPTS="-Daeron.sample.channel=aeron:udp?control=localhost:20550|control-mode=dynamic|alias=replay-merge-sample"
+
+./recorded-basic-publisher
+```
+
+3. Start a basic subscriber so that the publication connects and can record. Make sure `aeron.sample.channel` matches the publication channel.
+```shell
+export JVM_OPTS="-Daeron.sample.channel=aeron:udp?control=localhost:20550"
+
+../basic-subscriber
+```
+
+4. Wait a moment, then start a ReplayMerge subscriber, setting `aeron.sample.channel` to the same channel as the publication.
+
+```shell
+export JVM_OPTS="-Daeron.sample.channel=aeron:udp?control=localhost:20550"
+
+./replay-merge-subscriber
+```
+
+## Persistent Subscription
+
+When running the commands below, you can customize their configuration by passing system properties using the `JVM_OPTS` environment variable, e.g.:
+
+```shell
+JVM_OPTS="-Dfoo=bar" ./baz
+```
+
+1. Start the archiving media driver in its own terminal.
+
+```shell
+./archiving-media-driver
+```
+
+2. Start a publisher with its recorded publication in another terminal.
+
+```shell
+./recorded-basic-publisher
+```
+
+3. Start a basic subscriber so that the publication connects and can record.
+
+```shell
+../basic-subscriber
+```
+
+4. Let some messages be sent, then start a Persistent Subscription subscriber.
+
+```shell
+./persistent-subscriber
+```

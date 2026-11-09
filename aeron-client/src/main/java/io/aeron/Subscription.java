@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,35 +16,52 @@
 package io.aeron;
 
 import io.aeron.exceptions.AeronException;
-import io.aeron.logbuffer.*;
+import io.aeron.logbuffer.BlockHandler;
+import io.aeron.logbuffer.ControlledFragmentHandler;
+import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.logbuffer.RawBlockHandler;
 import io.aeron.status.ChannelEndpointStatus;
+import io.aeron.status.LocalSocketAddressStatus;
 import org.agrona.collections.ArrayUtil;
 
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.function.Consumer;
 
-class SubscriptionLhsPadding
+import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.MDC_CONTROL_MODE_MANUAL;
+import static io.aeron.CommonContext.MDC_CONTROL_MODE_PARAM_NAME;
+import static io.aeron.CommonContext.SPY_PREFIX;
+
+abstract class SubscriptionLhsPadding
 {
-    @SuppressWarnings("unused")
-    protected long p1, p2, p3, p4, p5, p6, p7;
+    byte p000, p001, p002, p003, p004, p005, p006, p007, p008, p009, p010, p011, p012, p013, p014, p015;
+    byte p016, p017, p018, p019, p020, p021, p022, p023, p024, p025, p026, p027, p028, p029, p030, p031;
+    byte p032, p033, p034, p035, p036, p037, p038, p039, p040, p041, p042, p043, p044, p045, p046, p047;
+    byte p048, p049, p050, p051, p052, p053, p054, p055, p056, p057, p058, p059, p060, p061, p062, p063;
 }
 
-class SubscriptionFields extends SubscriptionLhsPadding
+abstract class SubscriptionFields extends SubscriptionLhsPadding
 {
-    protected static final Image[] EMPTY_ARRAY = new Image[0];
+    static final Image[] EMPTY_IMAGES = new Image[0];
 
-    protected final long registrationId;
-    protected final int streamId;
-    protected int roundRobinIndex = 0;
-    protected volatile boolean isClosed = false;
-    protected volatile Image[] images = EMPTY_ARRAY;
-    protected final ClientConductor conductor;
-    protected final String channel;
-    protected final AvailableImageHandler availableImageHandler;
-    protected final UnavailableImageHandler unavailableImageHandler;
-    protected int channelStatusId = 0;
+    final long registrationId;
+    final int streamId;
+    int roundRobinIndex = 0;
+    volatile boolean isClosed = false;
+    volatile Image[] images = EMPTY_IMAGES;
+    final ClientConductor conductor;
+    final String channel;
+    final AvailableImageHandler availableImageHandler;
+    final UnavailableImageHandler unavailableImageHandler;
+    ChannelUri channelUri;
+    String resolvedChannel;
+    String resolvedEndpoint;
+    int channelStatusId = ChannelEndpointStatus.NO_ID_ALLOCATED;
 
-    protected SubscriptionFields(
+    SubscriptionFields(
         final long registrationId,
         final int streamId,
         final ClientConductor clientConductor,
@@ -63,13 +80,14 @@ class SubscriptionFields extends SubscriptionLhsPadding
 
 /**
  * Aeron Subscriber API for receiving a reconstructed {@link Image} for a stream of messages from publishers on
- * a given channel and streamId pair. {@link Image}s are aggregated under a {@link Subscription}.
+ * a given channel and streamId pair, i.e. a {@link Publication}. {@link Image}s are aggregated under a
+ * {@link Subscription}.
  * <p>
  * {@link Subscription}s are created via an {@link Aeron} object, and received messages are delivered
  * to the {@link FragmentHandler}.
  * <p>
- * By default fragmented messages are not reassembled before delivery. If an application must
- * receive whole messages, whether or not they were fragmented, then the Subscriber
+ * By default, fragmented messages are not reassembled before delivery. If an application must
+ * receive whole messages, even if they were fragmented, then the Subscriber
  * should be created with a {@link FragmentAssembler} or a custom implementation.
  * <p>
  * It is an application's responsibility to {@link #poll} the {@link Subscription} for new messages.
@@ -81,10 +99,12 @@ class SubscriptionFields extends SubscriptionLhsPadding
  * @see Aeron#addSubscription(String, int)
  * @see Aeron#addSubscription(String, int, AvailableImageHandler, UnavailableImageHandler)
  */
-public class Subscription extends SubscriptionFields implements AutoCloseable
+public final class Subscription extends SubscriptionFields implements AutoCloseable
 {
-    @SuppressWarnings("unused")
-    protected long p1, p2, p3, p4, p5, p6, p7;
+    byte p064, p065, p066, p067, p068, p069, p070, p071, p072, p073, p074, p075, p076, p077, p078, p079;
+    byte p080, p081, p082, p083, p084, p085, p086, p087, p088, p089, p090, p091, p092, p093, p094, p095;
+    byte p096, p097, p098, p099, p100, p101, p102, p103, p104, p105, p106, p107, p108, p109, p110, p111;
+    byte p112, p113, p114, p115, p116, p117, p118, p119, p120, p121, p122, p123, p124, p125, p126, p127;
 
     Subscription(
         final ClientConductor conductor,
@@ -163,7 +183,7 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
      *
      * @param fragmentHandler callback for handling each message fragment as it is read.
      * @param fragmentLimit   number of message fragments to limit when polling across multiple {@link Image}s.
-     * @return the number of fragments received
+     * @return the number of fragments received.
      */
     public int poll(final FragmentHandler fragmentHandler, final int fragmentLimit)
     {
@@ -174,7 +194,8 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
         int startingIndex = roundRobinIndex++;
         if (startingIndex >= length)
         {
-            roundRobinIndex = startingIndex = 0;
+            startingIndex = 0;
+            roundRobinIndex = 1;
         }
 
         for (int i = startingIndex; i < length && fragmentsRead < fragmentLimit; i++)
@@ -192,7 +213,7 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
 
     /**
      * Poll in a controlled manner the {@link Image}s under the subscription for available message fragments.
-     * Control is applied to fragments in the stream. If more fragments can be read on another stream
+     * Control is applied to message fragments in the stream. If more fragments can be read on another stream
      * they will even if BREAK or ABORT is returned from the fragment handler.
      * <p>
      * Each fragment read will be a whole message if it is under MTU length. If larger than MTU then it will come
@@ -202,7 +223,7 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
      *
      * @param fragmentHandler callback for handling each message fragment as it is read.
      * @param fragmentLimit   number of message fragments to limit when polling across multiple {@link Image}s.
-     * @return the number of fragments received
+     * @return the number of fragments received.
      * @see ControlledFragmentHandler
      */
     public int controlledPoll(final ControlledFragmentHandler fragmentHandler, final int fragmentLimit)
@@ -214,7 +235,8 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
         int startingIndex = roundRobinIndex++;
         if (startingIndex >= length)
         {
-            roundRobinIndex = startingIndex = 0;
+            startingIndex = 0;
+            roundRobinIndex = 1;
         }
 
         for (int i = startingIndex; i < length && fragmentsRead < fragmentLimit; i++)
@@ -333,8 +355,8 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
     /**
      * Get the {@link Image} at the given index from the images array.
      *
-     * @param index in the array
-     * @return image at given index
+     * @param index in the array.
+     * @return image at given index.
      * @throws ArrayIndexOutOfBoundsException if the index is not valid.
      */
     public Image imageAtIndex(final int index)
@@ -374,7 +396,7 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
     {
         if (!isClosed)
         {
-            conductor.releaseSubscription(this);
+            conductor.removeSubscription(this);
         }
     }
 
@@ -406,6 +428,38 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
         }
 
         return conductor.channelStatus(channelStatusId);
+    }
+
+    /**
+     * Get the counter used to represent the channel status for this Subscription.
+     *
+     * @return the counter used to represent the channel status for this Subscription.
+     */
+    public int channelStatusId()
+    {
+        return channelStatusId;
+    }
+
+    /**
+     * Fetches the local socket addresses for this subscription. If the channel is not
+     * {@link io.aeron.status.ChannelEndpointStatus#ACTIVE}, then this will return an empty list.
+     * <p>
+     * The format is as follows:
+     * <br>
+     * <br>
+     * IPv4: <code>ip address:port</code>
+     * <br>
+     * IPv6: <code>[ip6 address]:port</code>
+     * <br>
+     * <br>
+     * This is to match the formatting used in the Aeron URI.
+     *
+     * @return {@link List} of local socket addresses for this subscription.
+     * @see #channelStatus()
+     */
+    public List<String> localSocketAddresses()
+    {
+        return LocalSocketAddressStatus.findAddresses(conductor.countersReader(), channelStatus(), channelStatusId);
     }
 
     /**
@@ -476,23 +530,73 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
         return conductor.asyncRemoveRcvDestination(registrationId, endpointChannel);
     }
 
+    /**
+     * Resolve channel endpoint and replace it with the port from the ephemeral range when 0 was provided.
+     *
+     * @return original channel URI string if it does not have an endpoint (IPC, response channel, MDS) or if endpoint
+     * is not using an ephemeral port, channel URI where ephemeral port is resolved to the actual bind port or
+     * {@code null} if the channel is not {@link io.aeron.status.ChannelEndpointStatus#ACTIVE}.
+     * @see #channelStatus()
+     * @see #localSocketAddresses()
+     */
+    public String tryResolveChannelEndpointPort()
+    {
+        if (null == resolvedChannel)
+        {
+            if (null == channelUri)
+            {
+                final ChannelUri uri = ChannelUri.parse(channel);
+                final String endpoint = uri.get(ENDPOINT_PARAM_NAME);
+                if (null == endpoint ||
+                    !endpoint.endsWith(":0") ||
+                    MDC_CONTROL_MODE_MANUAL.equals(uri.get(MDC_CONTROL_MODE_PARAM_NAME)))
+                {
+                    resolvedChannel = channel;
+                    return channel;
+                }
+                channelUri = uri;
+            }
+
+            final String endpoint = resolvedEndpoint();
+            if (null != endpoint)
+            {
+                channelUri.replaceEndpointWildcardPort(endpoint);
+                resolvedChannel = channelUri.toString();
+            }
+        }
+        return resolvedChannel;
+    }
+
+    /**
+     * Find the resolved endpoint for the channel. This may be {@code null} if MDS is used and no destination is yet
+     * added. The result will similar to taking the first element returned from {@link #localSocketAddresses()}. If more
+     * than one destination is added then the first found is returned.
+     *
+     * @return resolved endpoint or {@code null} if not found.
+     * @see #channelStatus()
+     * @see #localSocketAddresses()
+     */
+    public String resolvedEndpoint()
+    {
+        if (null == resolvedEndpoint)
+        {
+            resolvedEndpoint =
+                LocalSocketAddressStatus.findAddress(conductor.countersReader(), channelStatus(), channelStatusId);
+        }
+        return resolvedEndpoint;
+    }
+
     void channelStatusId(final int id)
     {
         channelStatusId = id;
     }
 
-    int channelStatusId()
+    void internalClose(final long lingerDurationNs)
     {
-        return channelStatusId;
-    }
-
-    void internalClose()
-    {
-        isClosed = true;
         final Image[] images = this.images;
-        this.images = EMPTY_ARRAY;
-
-        conductor.closeImages(images, unavailableImageHandler);
+        this.images = EMPTY_IMAGES;
+        isClosed = true;
+        conductor.closeImages(images, unavailableImageHandler, lingerDurationNs);
     }
 
     void addImage(final Image image)
@@ -519,21 +623,37 @@ public class Subscription extends SubscriptionFields implements AutoCloseable
 
         if (null != removedImage)
         {
-            images = ArrayUtil.remove(oldArray, i);
             removedImage.close();
-            conductor.releaseLogBuffers(removedImage.logBuffers(), correlationId);
+            images = oldArray.length == 1 ? EMPTY_IMAGES : ArrayUtil.remove(oldArray, i);
+            conductor.releaseLogBuffers(removedImage.logBuffers(), correlationId, NULL_VALUE);
         }
 
         return removedImage;
     }
 
+    void rejectImage(final long correlationId, final long position, final String reason)
+    {
+        if (channel().startsWith(SPY_PREFIX))
+        {
+            throw new AeronException("spies can not reject images");
+        }
+
+        conductor.rejectImage(correlationId, position, reason);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "Subscription{" +
             "registrationId=" + registrationId +
             ", isClosed=" + isClosed +
+            ", isConnected=" + isConnected() +
             ", streamId=" + streamId +
             ", channel='" + channel + '\'' +
+            ", localSocketAddresses=" + localSocketAddresses() +
             ", imageCount=" + imageCount() +
             '}';
     }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,46 +17,50 @@ package io.aeron;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.LogBufferDescriptor;
-import io.aeron.test.TestMediaDriver;
-import org.junit.Test;
-import org.junit.experimental.theories.DataPoint;
-import org.junit.experimental.theories.Theories;
-import org.junit.experimental.theories.Theory;
-import org.junit.runner.RunWith;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@RunWith(Theories.class)
-public class TermBufferLengthTest
+class TermBufferLengthTest
 {
-    public static final int TEST_TERM_LENGTH = LogBufferDescriptor.TERM_MIN_LENGTH * 2;
+    private static final int STREAM_ID = 1001;
 
-    @DataPoint
-    public static final String UNICAST_TEST_CHANNEL =
-        "aeron:udp?endpoint=localhost:54325|" + CommonContext.TERM_LENGTH_PARAM_NAME + "=" + TEST_TERM_LENGTH;
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    @DataPoint
-    public static final String IPC_TEST_CHANNEL =
-        "aeron:ipc?" + CommonContext.TERM_LENGTH_PARAM_NAME + "=" + TEST_TERM_LENGTH;
-
-    public static final int STREAM_ID = 1;
-
-    @Theory
-    @Test
-    public void shouldHaveCorrectTermBufferLength(final String channel)
+    @ParameterizedTest
+    @CsvSource({
+        "aeron:udp?endpoint=localhost:24325|term-length=64K, 65536",
+        "aeron:ipc?term-length=64K, 65536",
+        "aeron:udp?endpoint=localhost:24325|term-length=1G, 1073741824",
+        "aeron:ipc?term-length=1G, 1073741824",
+        "aeron:udp?endpoint=localhost:24325|term-length=4M, 4194304",
+        "aeron:ipc?term-length=512K, 524288",
+    })
+    void shouldHaveCorrectTermBufferLength(final String channel, final int expectedTermBufferLength)
     {
         final MediaDriver.Context ctx = new MediaDriver.Context()
-            .errorHandler(Throwable::printStackTrace)
-            .dirDeleteOnShutdown(true)
-            .publicationTermBufferLength(TEST_TERM_LENGTH * 2)
-            .ipcTermBufferLength(TEST_TERM_LENGTH * 2);
+            .errorHandler(Tests::onError)
+            .dirDeleteOnStart(true)
+            .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH * 2)
+            .ipcTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH * 2);
 
-        try (TestMediaDriver ignore = TestMediaDriver.launch(ctx);
-            Aeron aeron = Aeron.connect();
-            Publication publication = aeron.addPublication(channel, STREAM_ID))
+        try (
+            TestMediaDriver mediaDriver = TestMediaDriver.launch(ctx, testWatcher))
         {
-            assertThat(publication.termBufferLength(), is(TEST_TERM_LENGTH));
+            testWatcher.dataCollector().add(mediaDriver.context().aeronDirectory());
+
+            try (
+                Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
+                Publication publication = aeron.addPublication(channel, STREAM_ID))
+            {
+                assertEquals(expectedTermBufferLength, publication.termBufferLength());
+            }
         }
     }
 }

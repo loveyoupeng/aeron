@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ public interface FlowControlSupplier
      *
      * @param udpChannel     for the publication.
      * @param streamId       for the publication.
-     * @param registrationId for the the publication.
+     * @param registrationId for the publication.
      * @return flow control instance ready for immediate usage.
      */
     FlowControl newInstance(UdpChannel udpChannel, int streamId, long registrationId);

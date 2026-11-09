@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,47 +15,85 @@
  */
 package io.aeron.protocol;
 
+import io.aeron.logbuffer.FrameDescriptor;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import java.nio.ByteBuffer;
 
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 
+// CHECKSTYLE:OFF:LineLength
 /**
  * Flyweight for a NAK Message Frame.
  * <p>
  * <a target="_blank"
- *    href="https://github.com/real-logic/aeron/wiki/Protocol-Specification#data-recovery-via-retransmit-request">
- * Data Recovery</a> wiki page.
+ * href="https://github.com/aeron-io/aeron/wiki/Transport-Protocol-Specification#data-recovery-via-retransmit-request">
+ * Data Loss Recovery</a> wiki page.
  */
+// CHECKSTYLE:ON:LineLength
 public class NakFlyweight extends HeaderFlyweight
 {
+    /**
+     * Length of the frame in bytes.
+     */
     public static final int HEADER_LENGTH = 28;
 
+    /**
+     * Offset in the frame at which the session-id field begins.
+     */
     private static final int SESSION_ID_FIELD_OFFSET = 8;
+
+    /**
+     * Offset in the frame at which the stream-id field begins.
+     */
     private static final int STREAM_ID_FIELD_OFFSET = 12;
+
+    /**
+     * Offset in the frame at which the term-id field begins.
+     */
     private static final int TERM_ID_FIELD_OFFSET = 16;
+
+    /**
+     * Offset in the frame at which the term-offset field begins.
+     */
     private static final int TERM_OFFSET_FIELD_OFFSET = 20;
+
+    /**
+     * Offset in the frame at which the length of the NAK range field begins.
+     */
     private static final int LENGTH_FIELD_OFFSET = 24;
 
+    /**
+     * Default constructor which can later be used to wrap a frame.
+     */
     public NakFlyweight()
     {
     }
 
+    /**
+     * Construct the flyweight over a frame.
+     *
+     * @param buffer containing the frame.
+     */
     public NakFlyweight(final ByteBuffer buffer)
     {
         super(buffer);
     }
 
+    /**
+     * Construct the flyweight over a frame.
+     *
+     * @param buffer containing the frame.
+     */
     public NakFlyweight(final UnsafeBuffer buffer)
     {
         super(buffer);
     }
 
     /**
-     * return session id field
+     * The session-id for the stream.
      *
-     * @return session id field
+     * @return session-id for the stream.
      */
     public int sessionId()
     {
@@ -63,10 +101,10 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set session id field
+     * Set session-id for the stream.
      *
-     * @param sessionId field value
-     * @return flyweight
+     * @param sessionId session-id for the stream.
+     * @return this for a fluent API.
      */
     public NakFlyweight sessionId(final int sessionId)
     {
@@ -76,9 +114,9 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return stream id field
+     * The stream-id for the stream.
      *
-     * @return stream id field
+     * @return stream-id for the stream.
      */
     public int streamId()
     {
@@ -86,10 +124,10 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set stream id field
+     * Set stream-id for the stream.
      *
-     * @param streamId field value
-     * @return flyweight
+     * @param streamId stream-id for the stream.
+     * @return this for a fluent API.
      */
     public NakFlyweight streamId(final int streamId)
     {
@@ -99,9 +137,9 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return term id field
+     * The term-id for the stream.
      *
-     * @return term id field
+     * @return term-id for the stream.
      */
     public int termId()
     {
@@ -109,10 +147,10 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set term id field
+     * Set term-id for the stream.
      *
-     * @param termId field value
-     * @return flyweight
+     * @param termId term-id for the stream.
+     * @return this for a fluent API.
      */
     public NakFlyweight termId(final int termId)
     {
@@ -122,9 +160,9 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return term offset field
+     * The term-offset for the stream.
      *
-     * @return term offset field
+     * @return term-offset for the stream.
      */
     public int termOffset()
     {
@@ -132,10 +170,10 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set term offset field
+     * Set term-offset for the stream.
      *
-     * @param termOffset field value
-     * @return flyweight
+     * @param termOffset term-offset for the stream.
+     * @return for a fluent API.
      */
     public NakFlyweight termOffset(final int termOffset)
     {
@@ -145,9 +183,9 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * The length field
+     * The length of the encoded frame.
      *
-     * @return length field
+     * @return length of the encoded frame.
      */
     public int length()
     {
@@ -155,10 +193,10 @@ public class NakFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set length field
+     * Set length of the encoded frame.
      *
-     * @param length field value
-     * @return flyweight
+     * @param length of the encoded frame.
+     * @return this for a fluent API.
      */
     public NakFlyweight length(final int length)
     {
@@ -167,6 +205,24 @@ public class NakFlyweight extends HeaderFlyweight
         return this;
     }
 
+    /**
+     * Check if the NAK frame is valid given the {@code termLength}.
+     *
+     * @param termLength to check against.
+     * @return {@code true} if valid.
+     */
+    public boolean isValid(final int termLength)
+    {
+        final int termOffset = termOffset();
+        final int length = length();
+        return termOffset >= 0 && termOffset < termLength && FrameDescriptor.isFrameAligned(termOffset) &&
+            length >= 0 && ((long)termOffset + length) <= termLength;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "NAK{" +

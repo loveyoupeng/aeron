@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.cluster.client.ClusterClock;
+import io.aeron.cluster.service.ClusterClock;
 import org.agrona.concurrent.HighResolutionClock;
 
 import java.util.concurrent.TimeUnit;
@@ -26,8 +26,16 @@ import java.util.concurrent.TimeUnit;
 public class NanosecondClusterClock implements ClusterClock
 {
     /**
+     * Default constructor.
+     */
+    public NanosecondClusterClock()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public TimeUnit timeUnit()
     {
         return TimeUnit.NANOSECONDS;
@@ -36,8 +44,45 @@ public class NanosecondClusterClock implements ClusterClock
     /**
      * {@inheritDoc}
      */
+    @Override
     public long time()
     {
         return HighResolutionClock.epochNanos();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long timeMillis()
+    {
+        return System.currentTimeMillis();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long timeMicros()
+    {
+        return HighResolutionClock.epochMicros();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long timeNanos()
+    {
+        return HighResolutionClock.epochNanos();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long convertToNanos(final long time)
+    {
+        return time;
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,52 +15,112 @@
  */
 package io.aeron.protocol;
 
+import io.aeron.logbuffer.FrameDescriptor;
+import org.agrona.BitUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import java.nio.ByteBuffer;
 
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MAX_LENGTH;
+import static io.aeron.logbuffer.LogBufferDescriptor.TERM_MIN_LENGTH;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 
 /**
  * HeaderFlyweight for Setup Message Frames.
  * <p>
- * <a target="_blank" href="https://github.com/real-logic/aeron/wiki/Protocol-Specification#stream-setup">
- *     Stream Setup</a> wiki page.
+ * <a target="_blank" href="https://github.com/aeron-io/aeron/wiki/Transport-Protocol-Specification#stream-setup">
+ * Stream Setup</a> wiki page.
  */
 public class SetupFlyweight extends HeaderFlyweight
 {
     /**
-     * Length of the Setup Message Frame
+     * Length of the Setup Message Frame.
      */
     public static final int HEADER_LENGTH = 40;
 
+    /**
+     * Subscriber should send response channel setup message.
+     */
+    public static final short SEND_RESPONSE_SETUP_FLAG = 0x80;
+
+    /**
+     * Publication uses group/multicast semantics.
+     */
+    public static final short GROUP_FLAG = 0x40;
+
+    /**
+     * Offset in the frame at which the term-offset field begins.
+     */
     private static final int TERM_OFFSET_FIELD_OFFSET = 8;
+
+    /**
+     * Offset in the frame at which the session-id field begins.
+     */
     private static final int SESSION_ID_FIELD_OFFSET = 12;
+
+    /**
+     * Offset in the frame at which the stream-id field begins.
+     */
     private static final int STREAM_ID_FIELD_OFFSET = 16;
+
+    /**
+     * Offset in the frame at which the initial-term-id field begins.
+     */
     private static final int INITIAL_TERM_ID_FIELD_OFFSET = 20;
+
+    /**
+     * Offset in the frame at which the active-term-id field begins.
+     */
     private static final int ACTIVE_TERM_ID_FIELD_OFFSET = 24;
+
+    /**
+     * Offset in the frame at which the term-length field begins.
+     */
     private static final int TERM_LENGTH_FIELD_OFFSET = 28;
+
+    /**
+     * Offset in the frame at which the mtu-length field begins.
+     */
     private static final int MTU_LENGTH_FIELD_OFFSET = 32;
+
+    /**
+     * Offset in the frame at which the multicast TTL (Time To Live) field begins.
+     */
     private static final int TTL_FIELD_OFFSET = 36;
 
+    static final int MAX_UDP_PAYLOAD_LENGTH = 65504;
+
+    /**
+     * Default constructor which can later be used to wrap a frame.
+     */
     public SetupFlyweight()
     {
     }
 
+    /**
+     * Construct the flyweight over a frame.
+     *
+     * @param buffer containing the frame.
+     */
     public SetupFlyweight(final UnsafeBuffer buffer)
     {
         super(buffer);
     }
 
+    /**
+     * Construct the flyweight over a frame.
+     *
+     * @param buffer containing the frame.
+     */
     public SetupFlyweight(final ByteBuffer buffer)
     {
         super(buffer);
     }
 
     /**
-     * return term offset field
+     * Get term offset field.
      *
-     * @return term offset field
+     * @return term offset field.
      */
     public int termOffset()
     {
@@ -68,10 +128,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set term offset field
+     * Set term offset field.
      *
-     * @param termOffset field value
-     * @return flyweight
+     * @param termOffset field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight termOffset(final int termOffset)
     {
@@ -81,9 +141,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return session id field
+     * Get session id field.
      *
-     * @return session id field
+     * @return session id field.
      */
     public int sessionId()
     {
@@ -91,10 +151,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set session id field
+     * Set session id field.
      *
-     * @param sessionId field value
-     * @return flyweight
+     * @param sessionId field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight sessionId(final int sessionId)
     {
@@ -104,9 +164,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return stream id field
+     * Get stream id field.
      *
-     * @return stream id field
+     * @return stream id field.
      */
     public int streamId()
     {
@@ -114,10 +174,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set stream id field
+     * Set stream id field.
      *
-     * @param streamId field value
-     * @return flyweight
+     * @param streamId field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight streamId(final int streamId)
     {
@@ -127,9 +187,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return initial term id field
+     * Get initial term id field.
      *
-     * @return initial term id field
+     * @return initial term id field.
      */
     public int initialTermId()
     {
@@ -137,10 +197,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set initial term id field
+     * Set initial term id field.
      *
-     * @param termId field value
-     * @return flyweight
+     * @param termId field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight initialTermId(final int termId)
     {
@@ -150,9 +210,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return active term id field
+     * Get active term id field.
      *
-     * @return term id field
+     * @return term id field.
      */
     public int activeTermId()
     {
@@ -160,10 +220,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set active term id field
+     * Set active term id field.
      *
-     * @param termId field value
-     * @return flyweight
+     * @param termId field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight activeTermId(final int termId)
     {
@@ -173,9 +233,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * return term length field
+     * Get term length field.
      *
-     * @return term length field value
+     * @return term length field value.
      */
     public int termLength()
     {
@@ -183,10 +243,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * set term length field
+     * Set term length field.
      *
-     * @param termLength field value
-     * @return flyweight
+     * @param termLength field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight termLength(final int termLength)
     {
@@ -196,9 +256,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Return MTU length field
+     * Get MTU length field.
      *
-     * @return MTU length field value
+     * @return MTU length field value.
      */
     public int mtuLength()
     {
@@ -206,10 +266,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Set MTU length field
+     * Set MTU length field.
      *
-     * @param mtuLength field value
-     * @return flyweight
+     * @param mtuLength field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight mtuLength(final int mtuLength)
     {
@@ -219,9 +279,9 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Return the TTL field
+     * Get the TTL field.
      *
-     * @return TTL field value
+     * @return TTL field value.
      */
     public int ttl()
     {
@@ -229,10 +289,10 @@ public class SetupFlyweight extends HeaderFlyweight
     }
 
     /**
-     * Set the TTL field
+     * Set the TTL field.
      *
-     * @param ttl field value
-     * @return flyweight
+     * @param ttl field value.
+     * @return this for a fluent API.
      */
     public SetupFlyweight ttl(final int ttl)
     {
@@ -241,6 +301,26 @@ public class SetupFlyweight extends HeaderFlyweight
         return this;
     }
 
+    /**
+     * Check if the setup frame is properly formed.
+     *
+     * @return {@code true} if valid.
+     */
+    public boolean isValid()
+    {
+        final int termOffset = termOffset();
+        final int termLength = termLength();
+        final int mtuLength = mtuLength();
+        return termLength >= TERM_MIN_LENGTH && termLength <= TERM_MAX_LENGTH && BitUtil.isPowerOfTwo(termLength) &&
+            termOffset >= 0 && termOffset < termLength && FrameDescriptor.isFrameAligned(termOffset) &&
+            mtuLength >= DataHeaderFlyweight.HEADER_LENGTH && mtuLength <= MAX_UDP_PAYLOAD_LENGTH &&
+            FrameDescriptor.isFrameAligned(mtuLength);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "SETUP{" +

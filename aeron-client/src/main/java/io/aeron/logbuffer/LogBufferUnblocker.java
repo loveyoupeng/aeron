@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,16 +22,20 @@ import static io.aeron.logbuffer.LogBufferDescriptor.*;
 /**
  * Provides the functionality to unblock a log at a given position.
  */
-public class LogBufferUnblocker
+public final class LogBufferUnblocker
 {
+    private LogBufferUnblocker()
+    {
+    }
+
     /**
-     * Attempt to unblock a log buffer at given position
+     * Attempt to unblock a log buffer at given position.
      *
-     * @param termBuffers       for current blockedOffset
-     * @param logMetaDataBuffer for log buffer
-     * @param blockedPosition   to attempt to unblock
-     * @param termLength        of the buffer for each term in the log
-     * @return whether unblocked or not
+     * @param termBuffers       for current blockedOffset.
+     * @param logMetaDataBuffer for log buffer.
+     * @param blockedPosition   to attempt to unblock.
+     * @param termLength        of the buffer for each term in the log.
+     * @return whether attempt was made to unblock.
      */
     public static boolean unblock(
         final UnsafeBuffer[] termBuffers,
@@ -47,7 +51,8 @@ public class LogBufferUnblocker
         if (activeTermCount == (blockedTermCount - 1) && blockedOffset == 0)
         {
             final int currentTermId = termId(rawTailVolatile(logMetaDataBuffer, indexByTermCount(activeTermCount)));
-            return rotateLog(logMetaDataBuffer, activeTermCount, currentTermId);
+            rotateLog(logMetaDataBuffer, activeTermCount, currentTermId);
+            return true;
         }
 
         final int blockedIndex = indexByTermCount(blockedTermCount);
@@ -58,9 +63,13 @@ public class LogBufferUnblocker
 
         switch (TermUnblocker.unblock(logMetaDataBuffer, termBuffer, blockedOffset, tailOffset, termId))
         {
+            case NO_ACTION:
+                break;
+
             case UNBLOCKED_TO_END:
                 rotateLog(logMetaDataBuffer, blockedTermCount, termId);
-                // fall through
+                return true;
+
             case UNBLOCKED:
                 return true;
         }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,42 +15,54 @@
  */
 package io.aeron.command;
 
-import io.aeron.ErrorCode;
 import io.aeron.exceptions.ControlProtocolException;
 import org.agrona.MutableDirectBuffer;
 
+import static io.aeron.ErrorCode.MALFORMED_COMMAND;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
  * Base flyweight that can be extended to track a client request.
- *
+ * <p>
  * 0                   1                   2                   3
  * 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  * +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- * |                            Client ID                          |
+ * |                         Client ID                             |
  * |                                                               |
  * +---------------------------------------------------------------+
- * |                         Correlation ID                        |
+ * |                       Correlation ID                          |
  * |                                                               |
  * +---------------------------------------------------------------+
  */
 public class CorrelatedMessageFlyweight
 {
-    public static final int CLIENT_ID_FIELD_OFFSET = 0;
-    public static final int CORRELATION_ID_FIELD_OFFSET = CLIENT_ID_FIELD_OFFSET + SIZE_OF_LONG;
+    /**
+     * Length of the header.
+     */
     public static final int LENGTH = 2 * SIZE_OF_LONG;
+    private static final int CLIENT_ID_FIELD_OFFSET = 0;
+    static final int CORRELATION_ID_FIELD_OFFSET = CLIENT_ID_FIELD_OFFSET + SIZE_OF_LONG;
 
-    protected MutableDirectBuffer buffer;
-    protected int offset;
+    MutableDirectBuffer buffer;
+    int offset;
+
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public CorrelatedMessageFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
      *
-     * @param buffer to wrap
+     * @param buffer to wrap.
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
-    public final CorrelatedMessageFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
+    public CorrelatedMessageFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
         this.buffer = buffer;
         this.offset = offset;
@@ -59,9 +71,9 @@ public class CorrelatedMessageFlyweight
     }
 
     /**
-     * return client id field
+     * Get client id field.
      *
-     * @return client id field
+     * @return client id field.
      */
     public long clientId()
     {
@@ -69,10 +81,10 @@ public class CorrelatedMessageFlyweight
     }
 
     /**
-     * set client id field
+     * Set client id field.
      *
-     * @param clientId field value
-     * @return for fluent API
+     * @param clientId field value.
+     * @return this for a fluent API.
      */
     public CorrelatedMessageFlyweight clientId(final long clientId)
     {
@@ -82,9 +94,9 @@ public class CorrelatedMessageFlyweight
     }
 
     /**
-     * return correlation id field
+     * Get correlation id field.
      *
-     * @return correlation id field
+     * @return correlation id field.
      */
     public long correlationId()
     {
@@ -92,10 +104,10 @@ public class CorrelatedMessageFlyweight
     }
 
     /**
-     * set correlation id field
+     * Set correlation id field.
      *
-     * @param correlationId field value
-     * @return for fluent API
+     * @param correlationId field value.
+     * @return this for a fluent API.
      */
     public CorrelatedMessageFlyweight correlationId(final long correlationId)
     {
@@ -115,7 +127,7 @@ public class CorrelatedMessageFlyweight
         if (length < LENGTH)
         {
             throw new ControlProtocolException(
-                ErrorCode.MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
+                MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
         }
     }
 }

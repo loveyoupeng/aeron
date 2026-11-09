@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,6 @@
 
 /**
  * Services implement {@link io.aeron.cluster.service.ClusteredService} and have their lifecycle managed by the
- * {@link io.aeron.cluster.service.Cluster}. This is where business logic is hosted.
+ * {@link io.aeron.cluster.service.Cluster}. This is where application logic is contained.
  */
 package io.aeron.cluster.service;

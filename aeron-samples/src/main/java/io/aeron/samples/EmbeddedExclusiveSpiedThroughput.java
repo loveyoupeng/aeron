@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import io.aeron.CommonContext;
 import io.aeron.ExclusivePublication;
 import io.aeron.Subscription;
 import io.aeron.driver.MediaDriver;
-import io.aeron.logbuffer.FragmentHandler;
 import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
@@ -54,27 +53,32 @@ public class EmbeddedExclusiveSpiedThroughput
 
     private static volatile boolean printingActive = true;
 
-    public static void main(final String[] args) throws Exception
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws InterruptedException if interrupted during linger.
+     */
+    public static void main(final String[] args) throws InterruptedException
     {
         loadPropertiesFiles(args);
 
         final RateReporter reporter = new RateReporter(
             TimeUnit.SECONDS.toNanos(1), EmbeddedExclusiveSpiedThroughput::printRate);
-        final FragmentHandler rateReporterHandler = rateReporterHandler(reporter);
         final ExecutorService executor = Executors.newFixedThreadPool(2);
         final AtomicBoolean running = new AtomicBoolean(true);
 
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .spiesSimulateConnection(true);
 
-        try (MediaDriver ignore = MediaDriver.launch(ctx);
-            Aeron aeron = Aeron.connect();
+        try (MediaDriver mediaDriver = MediaDriver.launch(ctx);
+            Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
             Subscription subscription = aeron.addSubscription(CommonContext.SPY_PREFIX + CHANNEL, STREAM_ID);
             ExclusivePublication publication = aeron.addExclusivePublication(CHANNEL, STREAM_ID))
         {
             executor.execute(reporter);
             executor.execute(() -> SamplesUtil.subscriberLoop(
-                rateReporterHandler, FRAGMENT_COUNT_LIMIT, running).accept(subscription));
+                rateReporterHandler(reporter), FRAGMENT_COUNT_LIMIT, running).accept(subscription));
 
             final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
             final IdleStrategy idleStrategy = SampleConfiguration.newIdleStrategy();
@@ -93,7 +97,7 @@ public class EmbeddedExclusiveSpiedThroughput
                     OFFER_BUFFER.putLong(0, i);
 
                     idleStrategy.reset();
-                    while (publication.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH) < 0)
+                    while (publication.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH, null) < 0)
                     {
                         backPressureCount++;
                         idleStrategy.idle();
@@ -119,7 +123,7 @@ public class EmbeddedExclusiveSpiedThroughput
         }
     }
 
-    public static void printRate(
+    private static void printRate(
         final double messagesPerSec, final double bytesPerSec, final long totalFragments, final long totalBytes)
     {
         if (printingActive)

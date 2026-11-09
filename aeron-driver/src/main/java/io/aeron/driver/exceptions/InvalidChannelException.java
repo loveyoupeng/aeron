@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,15 +18,41 @@ package io.aeron.driver.exceptions;
 import io.aeron.ErrorCode;
 import io.aeron.exceptions.ControlProtocolException;
 
+/**
+ * Indicates an invalid URI for a channel has been received by the driver from a client.
+ */
 public class InvalidChannelException extends ControlProtocolException
 {
-    public InvalidChannelException(final String msg)
+    private static final long serialVersionUID = 8395688431913848255L;
+
+    /**
+     * Exception with provided message and {@link ErrorCode#INVALID_CHANNEL}.
+     *
+     * @param message to detail the exception.
+     */
+    public InvalidChannelException(final String message)
     {
-        super(ErrorCode.INVALID_CHANNEL, msg);
+        super(ErrorCode.INVALID_CHANNEL, message);
     }
 
-    public InvalidChannelException(final Exception rootCause)
+    /**
+     * Exception with provided cause and {@link ErrorCode#INVALID_CHANNEL}.
+     *
+     * @param cause of the exception.
+     */
+    public InvalidChannelException(final Exception cause)
     {
-        super(ErrorCode.INVALID_CHANNEL, rootCause);
+        super(ErrorCode.INVALID_CHANNEL, cause);
+    }
+
+    /**
+     * Exception with provided message, cause and {@link ErrorCode#INVALID_CHANNEL}.
+     *
+     * @param message to detail the exception.
+     * @param cause of the exception.
+     */
+    public InvalidChannelException(final String message, final Exception cause)
+    {
+        super(ErrorCode.INVALID_CHANNEL, message, cause);
     }
 }

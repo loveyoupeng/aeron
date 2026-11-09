@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,37 +29,35 @@ public interface ClusterBackupEventsListener
 
     /**
      * Possible failure of cluster leader detected.
+     *
+     * @param ex the underlying exception.
      */
-    void onPossibleClusterFailure();
+    void onPossibleFailure(Exception ex);
 
     /**
      * Backup response was received for a backup query.
      *
-     * @param clusterMembers in the backup response.
-     * @param leaderMember in the backup response.
+     * @param clusterMembers      in the backup response.
+     * @param logSourceMember     to be used to replicate data from.
      * @param snapshotsToRetrieve snapshots to be retrieved.
      */
     void onBackupResponse(
-        ClusterMember[] clusterMembers,
-        ClusterMember leaderMember,
-        List<RecordingLog.Snapshot> snapshotsToRetrieve);
+        ClusterMember[] clusterMembers, ClusterMember logSourceMember, List<RecordingLog.Snapshot> snapshotsToRetrieve);
 
     /**
      * Updated recording log.
      *
-     * @param recordingLog that was updated.
+     * @param recordingLog       that was updated.
      * @param snapshotsRetrieved the snapshots that were retrieved.
      */
-    void onUpdatedRecordingLog(
-        RecordingLog recordingLog,
-        List<RecordingLog.Snapshot> snapshotsRetrieved);
+    void onUpdatedRecordingLog(RecordingLog recordingLog, List<RecordingLog.Snapshot> snapshotsRetrieved);
 
     /**
-     * Update to the live log position as recorded to the local archive
+     * Update to the live log position as recorded to the local archive.
      *
-     * @param recordingId of the live log.
+     * @param recordingId           of the live log.
      * @param recordingPosCounterId {@link io.aeron.archive.status.RecordingPos} counter id for the live log.
-     * @param logPosition of the live log.
+     * @param logPosition           of the live log.
      */
     void onLiveLogProgress(long recordingId, long recordingPosCounterId, long logPosition);
 }

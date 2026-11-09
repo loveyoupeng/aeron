@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,86 +17,134 @@ package io.aeron.cluster;
 
 import io.aeron.Aeron;
 import io.aeron.ChannelUri;
+import io.aeron.ExclusivePublication;
 import io.aeron.Publication;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
+import io.aeron.exceptions.RegistrationException;
 import org.agrona.CloseHelper;
-import org.agrona.collections.ArrayUtil;
+import org.agrona.ErrorHandler;
 import org.agrona.collections.Int2ObjectHashMap;
 
+import java.util.List;
+
 import static io.aeron.Aeron.NULL_VALUE;
+import static io.aeron.ChannelUri.replacePortWithWildcard;
 import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
+import static io.aeron.CommonContext.MDC_CONTROL_PARAM_NAME;
 import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
 
 /**
  * Represents a member of the cluster that participates in consensus for storing state from the perspective
- * of any single member. It is is not a global view of the cluster, perspectives only exist from a vantage point.
+ * of any single member. It is not a global view of the cluster, perspectives only exist from a vantage point.
  */
 public final class ClusterMember
 {
-    public static final ClusterMember[] EMPTY_CLUSTER_MEMBER_ARRAY = new ClusterMember[0];
+    static final ClusterMember[] EMPTY_MEMBERS = new ClusterMember[0];
 
     private boolean isBallotSent;
     private boolean isLeader;
-    private boolean hasRequestedJoin;
-    private boolean hasSentTerminationAck;
+    private boolean hasTerminated;
     private int id;
-    private long leadershipTermId = Aeron.NULL_VALUE;
+    private long leadershipTermId = NULL_VALUE;
+    private long candidateTermId = NULL_VALUE;
+    private long catchupReplaySessionId = NULL_VALUE;
+    private long catchupReplayCorrelationId = NULL_VALUE;
+    private long changeCorrelationId = NULL_VALUE;
     private long logPosition = NULL_POSITION;
-    private long candidateTermId = Aeron.NULL_VALUE;
-    private long catchupReplaySessionId = Aeron.NULL_VALUE;
-    private long changeCorrelationId = Aeron.NULL_VALUE;
-    private long removalPosition = NULL_POSITION;
-    private long timeOfLastAppendPositionNs = Aeron.NULL_VALUE;
-    private final String clientFacingEndpoint;
-    private final String memberFacingEndpoint;
+    private long timeOfLastAppendPositionNs = NULL_VALUE;
+    private ExclusivePublication publication;
+    private String consensusChannel;
+    private final String consensusEndpoint;
+    private final String ingressEndpoint;
     private final String logEndpoint;
-    private final String transferEndpoint;
+    private final String catchupEndpoint;
     private final String archiveEndpoint;
-    private final String endpointsDetail;
-    private Publication publication;
+    private final String archiveResponseEndpoint;
+    private final String egressResponseEndpoint;
+    private final String endpoints;
     private Boolean vote = null;
 
     /**
      * Construct a new member of the cluster.
      *
-     * @param id                   unique id for the member.
-     * @param clientFacingEndpoint address and port endpoint to which cluster clients connect.
-     * @param memberFacingEndpoint address and port endpoint to which other cluster members connect.
-     * @param logEndpoint          address and port endpoint to which the log is replicated.
-     * @param transferEndpoint     address and port endpoint to which a stream is replayed to catchup to the leader.
-     * @param archiveEndpoint      address and port endpoint to which the archive control channel can be reached.
-     * @param endpointsDetail      comma separated list of endpoints.
+     * @param id                unique id for the member.
+     * @param ingressEndpoint   address and port endpoint to which cluster clients send ingress.
+     * @param consensusEndpoint address and port endpoint to which other cluster members connect.
+     * @param logEndpoint       address and port endpoint to which the log is replicated.
+     * @param catchupEndpoint   address and port endpoint to which a stream is replayed for catchup to the leader.
+     * @param archiveEndpoint   address and port endpoint to which the archive control channel can be reached.
+     * @param endpoints         comma separated list of endpoints.
      */
     public ClusterMember(
         final int id,
-        final String clientFacingEndpoint,
-        final String memberFacingEndpoint,
+        final String ingressEndpoint,
+        final String consensusEndpoint,
         final String logEndpoint,
-        final String transferEndpoint,
+        final String catchupEndpoint,
         final String archiveEndpoint,
-        final String endpointsDetail)
+        final String endpoints)
     {
-        this.id = id;
-        this.clientFacingEndpoint = clientFacingEndpoint;
-        this.memberFacingEndpoint = memberFacingEndpoint;
-        this.logEndpoint = logEndpoint;
-        this.transferEndpoint = transferEndpoint;
-        this.archiveEndpoint = archiveEndpoint;
-        this.endpointsDetail = endpointsDetail;
+        this(
+            id,
+            ingressEndpoint,
+            consensusEndpoint,
+            logEndpoint,
+            catchupEndpoint,
+            archiveEndpoint,
+            null,
+            null,
+            endpoints);
     }
 
     /**
-     * Reset the state of a cluster member so it can be canvassed and reestablished.
+     * Construct a new member of the cluster.
+     *
+     * @param id                      unique id for the member.
+     * @param ingressEndpoint         address and port endpoint to which cluster clients send ingress.
+     * @param consensusEndpoint       address and port endpoint to which other cluster members connect.
+     * @param logEndpoint             address and port endpoint to which the log is replicated.
+     * @param catchupEndpoint         address and port endpoint to which a stream is replayed for catchup to the
+     *                                leader.
+     * @param archiveEndpoint         address and port endpoint to which the archive control channel can be reached.
+     * @param archiveResponseEndpoint address and port endpoint to which the archive control response channel can be
+     *                                reached.
+     * @param egressResponseEndpoint  address and port endpoint to which the egress response channel can be reached.
+     * @param endpoints               comma separated list of endpoints.
+     */
+    public ClusterMember(
+        final int id,
+        final String ingressEndpoint,
+        final String consensusEndpoint,
+        final String logEndpoint,
+        final String catchupEndpoint,
+        final String archiveEndpoint,
+        final String archiveResponseEndpoint,
+        final String egressResponseEndpoint,
+        final String endpoints)
+    {
+        this.id = id;
+        this.ingressEndpoint = ingressEndpoint;
+        this.consensusEndpoint = consensusEndpoint;
+        this.logEndpoint = logEndpoint;
+        this.catchupEndpoint = catchupEndpoint;
+        this.archiveEndpoint = archiveEndpoint;
+        this.archiveResponseEndpoint = archiveResponseEndpoint;
+        this.egressResponseEndpoint = egressResponseEndpoint;
+        this.endpoints = endpoints;
+    }
+
+    /**
+     * Reset the state of a cluster member, so it can be canvassed and reestablished.
      */
     public void reset()
     {
         isBallotSent = false;
         isLeader = false;
-        hasRequestedJoin = false;
-        hasSentTerminationAck = false;
+        hasTerminated = false;
         vote = null;
-        candidateTermId = Aeron.NULL_VALUE;
-        leadershipTermId = Aeron.NULL_VALUE;
+        candidateTermId = NULL_VALUE;
+        leadershipTermId = NULL_VALUE;
         logPosition = NULL_POSITION;
     }
 
@@ -145,80 +193,25 @@ public final class ClusterMember
     }
 
     /**
-     * Set if this member requested to join the cluster.
+     * Set if this member has terminated.
      *
-     * @param hasRequestedJoin the cluster.
+     * @param hasTerminated in notification to the leader.
      * @return this for a fluent API.
      */
-    public ClusterMember hasRequestedJoin(final boolean hasRequestedJoin)
+    public ClusterMember hasTerminated(final boolean hasTerminated)
     {
-        this.hasRequestedJoin = hasRequestedJoin;
+        this.hasTerminated = hasTerminated;
         return this;
     }
 
     /**
-     * Has this member requested to join the cluster?
+     * Has this member notified that it has terminated?
      *
-     * @return has this member requested to join the cluster?
+     * @return has this member notified that it has terminated?
      */
-    public boolean hasRequestedJoin()
+    public boolean hasTerminated()
     {
-        return hasRequestedJoin;
-    }
-
-    /**
-     * Set if this member has sent a termination ack.
-     *
-     * @param hasSentTerminationAck to the leader.
-     * @return this for a fluent API.
-     */
-    public ClusterMember hasSentTerminationAck(final boolean hasSentTerminationAck)
-    {
-        this.hasSentTerminationAck = hasSentTerminationAck;
-        return this;
-    }
-
-    /**
-     * Has this member sent a termination ack?
-     *
-     * @return has this member sent a termination ack?
-     */
-    public boolean hasSentTerminationAck()
-    {
-        return hasSentTerminationAck;
-    }
-
-    /**
-     * Set the log position as of appending the event to be removed from the cluster.
-     *
-     * @param removalPosition as of appending the event to be removed from the cluster.
-     * @return this for a fluent API.
-     */
-    public ClusterMember removalPosition(final long removalPosition)
-    {
-        this.removalPosition = removalPosition;
-        return this;
-    }
-
-    /**
-     * The log position as of appending the event to be removed from the cluster.
-     *
-     * @return the log position as of appending the event to be removed from the cluster,
-     * or {@link io.aeron.archive.client.AeronArchive#NULL_POSITION} if not requested remove.
-     */
-    public long removalPosition()
-    {
-        return removalPosition;
-    }
-
-    /**
-     * Has this member requested to be removed from the cluster.
-     *
-     * @return true if this member requested to be removed from the cluster, otherwise false.
-     */
-    public boolean hasRequestedRemove()
-    {
-        return removalPosition != NULL_POSITION;
+        return hasTerminated;
     }
 
     /**
@@ -356,6 +349,28 @@ public final class ClusterMember
     }
 
     /**
+     * The correlation id for the replay when catching up to the leader.
+     *
+     * @param correlationId for the replay when catching up to the leader.
+     * @return this for a fluent API.
+     */
+    public ClusterMember catchupReplayCorrelationId(final long correlationId)
+    {
+        this.catchupReplayCorrelationId = correlationId;
+        return this;
+    }
+
+    /**
+     * The correlation id for the replay when catching up to the leader.
+     *
+     * @return the correlation id for the replay when catching up to the leader.
+     */
+    public long catchupReplayCorrelationId()
+    {
+        return catchupReplayCorrelationId;
+    }
+
+    /**
      * Correlation id assigned to the current action undertaken by the cluster member.
      *
      * @param correlationId assigned to the current action undertaken by the cluster member.
@@ -400,23 +415,23 @@ public final class ClusterMember
     }
 
     /**
-     * The address:port endpoint for this cluster member that clients will connect to.
+     * The address:port endpoint for this cluster member that other members connect to for achieving consensus.
      *
-     * @return the address:port endpoint for this cluster member that clients will connect to.
+     * @return the address:port endpoint for this cluster member that other members will connect to for consensus.
      */
-    public String clientFacingEndpoint()
+    public String consensusEndpoint()
     {
-        return clientFacingEndpoint;
+        return consensusEndpoint;
     }
 
     /**
-     * The address:port endpoint for this cluster member that other members connect to.
+     * The address:port endpoint for this cluster member that clients send ingress to.
      *
-     * @return the address:port endpoint for this cluster member that other members will connect to.
+     * @return the address:port endpoint for this cluster member that listens for ingress.
      */
-    public String memberFacingEndpoint()
+    public String ingressEndpoint()
     {
-        return memberFacingEndpoint;
+        return ingressEndpoint;
     }
 
     /**
@@ -430,13 +445,16 @@ public final class ClusterMember
     }
 
     /**
-     * The address:port endpoint for this cluster member to which a stream is replayed to for leader catchup.
+     * The address:port endpoint for this cluster member to which a stream is replayed for catchup to the leader.
+     * <p>
+     * It is recommended a port of 0 is used, so it is system allocated to avoid potential clashes.
      *
-     * @return the address:port endpoint for this cluster member to which a stream is replayed to for leader catchup.
+     * @return the address:port endpoint for this cluster member to which a stream is replayed for catchup to the
+     * leader.
      */
-    public String transferEndpoint()
+    public String catchupEndpoint()
     {
-        return transferEndpoint;
+        return catchupEndpoint;
     }
 
     /**
@@ -450,14 +468,37 @@ public final class ClusterMember
     }
 
     /**
+     * The address:port endpoint for this cluster member to use on the archive to set up a response channel for
+     * control, replay and replication.
+     *
+     * @return the address:port endpoint for the archive response channel to be used by archive clients within the
+     * cluster.
+     */
+    public String archiveResponseEndpoint()
+    {
+        return archiveResponseEndpoint;
+    }
+
+    /**
+     * The address:port endpoint for the cluster member that will serve as the control address for the egress response
+     * channel that client can connect to.
+     *
+     * @return the endpoint used for the egress response channel.
+     */
+    public String egressResponseEndpoint()
+    {
+        return egressResponseEndpoint;
+    }
+
+    /**
      * The string of endpoints for this member in a comma separated list in the same order they are parsed.
      *
      * @return list of endpoints for this member in a comma separated list.
      * @see #parse(String)
      */
-    public String endpointsDetail()
+    public String endpoints()
     {
-        return endpointsDetail;
+        return endpoints;
     }
 
     /**
@@ -465,7 +506,7 @@ public final class ClusterMember
      *
      * @return {@link Publication} used for send status updates to the member.
      */
-    public Publication publication()
+    public ExclusivePublication publication()
     {
         return publication;
     }
@@ -475,17 +516,19 @@ public final class ClusterMember
      *
      * @param publication used for send status updates to the member.
      */
-    public void publication(final Publication publication)
+    public void publication(final ExclusivePublication publication)
     {
         this.publication = publication;
     }
 
     /**
-     * Close member status publication and null out reference.
+     * Close consensus publication and null out reference.
+     *
+     * @param errorHandler to capture errors during close.
      */
-    public void closePublication()
+    public void closePublication(final ErrorHandler errorHandler)
     {
-        CloseHelper.close(publication);
+        CloseHelper.close(errorHandler, publication);
         publication = null;
     }
 
@@ -493,7 +536,7 @@ public final class ClusterMember
      * Parse the details for a cluster members from a string.
      * <p>
      * <code>
-     * member-id,client-facing:port,member-facing:port,log:port,transfer:port,archive:port|1,...
+     * member-id,ingress:port,consensus:port,log:port,catchup:port,archive:port|1,...
      * </code>
      *
      * @param value of the string to be parsed.
@@ -501,9 +544,9 @@ public final class ClusterMember
      */
     public static ClusterMember[] parse(final String value)
     {
-        if (null == value || value.length() == 0)
+        if (null == value || value.isEmpty())
         {
-            return ClusterMember.EMPTY_CLUSTER_MEMBER_ARRAY;
+            return ClusterMember.EMPTY_MEMBERS;
         }
 
         final String[] memberValues = value.split("\\|");
@@ -512,14 +555,28 @@ public final class ClusterMember
 
         for (int i = 0; i < length; i++)
         {
-            final String endpointsDetail = memberValues[i];
-            final String[] memberAttributes = endpointsDetail.split(",");
-            if (memberAttributes.length != 6)
+            final String idAndEndpoints = memberValues[i];
+            final String[] memberAttributes = idAndEndpoints.split(",");
+
+            if (memberAttributes.length < 6 || 8 < memberAttributes.length)
             {
-                throw new ClusterException("invalid member value: " + endpointsDetail + " within: " + value);
+                throw new ClusterException("invalid member value: " + idAndEndpoints + " within: " + value);
             }
 
-            final String justEndpoints = String.join(
+            final int clusterMemberId;
+            try
+            {
+                clusterMemberId = Integer.parseInt(memberAttributes[0]);
+            }
+            catch (final NumberFormatException ex)
+            {
+                throw new ClusterException("invalid cluster member id, must be an integer value", ex);
+            }
+
+            final String archiveResponseEndpoint = 6 < memberAttributes.length ? memberAttributes[6] : null;
+            final String egressResponseEndpoint = 7 < memberAttributes.length ? memberAttributes[7] : null;
+
+            String endpoints = String.join(
                 ",",
                 memberAttributes[1],
                 memberAttributes[2],
@@ -527,25 +584,45 @@ public final class ClusterMember
                 memberAttributes[4],
                 memberAttributes[5]);
 
+            if (null != archiveResponseEndpoint)
+            {
+                endpoints += "," + archiveResponseEndpoint;
+            }
+
+            if (null != egressResponseEndpoint)
+            {
+                endpoints += "," + egressResponseEndpoint;
+            }
+
             members[i] = new ClusterMember(
-                Integer.parseInt(memberAttributes[0]),
+                clusterMemberId,
                 memberAttributes[1],
                 memberAttributes[2],
                 memberAttributes[3],
                 memberAttributes[4],
                 memberAttributes[5],
-                justEndpoints);
+                archiveResponseEndpoint,
+                egressResponseEndpoint,
+                endpoints);
         }
 
         return members;
     }
 
-    public static ClusterMember parseEndpoints(final int id, final String endpointsDetail)
+    /**
+     * Parse a string containing the endpoints for a cluster node and passing to
+     * {@link #ClusterMember(int, String, String, String, String, String, String)}.
+     *
+     * @param id        of the member node.
+     * @param endpoints comma separated.
+     * @return the {@link ClusterMember} with the endpoints set.
+     */
+    public static ClusterMember parseEndpoints(final int id, final String endpoints)
     {
-        final String[] memberAttributes = endpointsDetail.split(",");
+        final String[] memberAttributes = endpoints.split(",");
         if (memberAttributes.length != 5)
         {
-            throw new ClusterException("invalid member value: " + endpointsDetail);
+            throw new ClusterException("invalid member value: " + endpoints);
         }
 
         return new ClusterMember(
@@ -555,17 +632,22 @@ public final class ClusterMember
             memberAttributes[2],
             memberAttributes[3],
             memberAttributes[4],
-            endpointsDetail);
+            endpoints);
     }
 
     /**
-     * Encode member details from a cluster members array to a string.
+     * Encode member endpoints from a cluster members array to a String.
      *
-     * @param clusterMembers to fill the details from
-     * @return String representation suitable for use with {@link ClusterMember#parse}
+     * @param clusterMembers to fill the details from.
+     * @return String representation suitable for use with {@link #parse(String)}.
      */
     public static String encodeAsString(final ClusterMember[] clusterMembers)
     {
+        if (0 == clusterMembers.length)
+        {
+            return "";
+        }
+
         final StringBuilder builder = new StringBuilder();
 
         for (int i = 0, length = clusterMembers.length; i < length; i++)
@@ -573,9 +655,9 @@ public final class ClusterMember
             final ClusterMember member = clusterMembers[i];
 
             builder
-                .append(member.id())
+                .append(member.id)
                 .append(',')
-                .append(member.endpointsDetail());
+                .append(member.endpoints);
 
             if ((length - 1) != i)
             {
@@ -587,57 +669,137 @@ public final class ClusterMember
     }
 
     /**
-     * Add the publications for sending status messages to the other members of the cluster.
+     * Encode member endpoints from a cluster members {@link List} to a String.
      *
-     * @param members    of the cluster.
-     * @param exclude    this member when adding publications.
-     * @param channelUri for the publication.
-     * @param streamId   for the publication.
-     * @param aeron      to add the publications to.
+     * @param clusterMembers to fill the details from.
+     * @return String representation suitable for use with {@link #parse(String)}.
      */
-    public static void addMemberStatusPublications(
-        final ClusterMember[] members,
-        final ClusterMember exclude,
-        final ChannelUri channelUri,
-        final int streamId,
-        final Aeron aeron)
+    public static String encodeAsString(final List<ClusterMember> clusterMembers)
     {
+        if (clusterMembers.isEmpty())
+        {
+            return "";
+        }
+
+        final StringBuilder builder = new StringBuilder();
+
+        for (int i = 0, length = clusterMembers.size(); i < length; i++)
+        {
+            final ClusterMember member = clusterMembers.get(i);
+
+            builder
+                .append(member.id)
+                .append(',')
+                .append(member.endpoints);
+
+            if ((length - 1) != i)
+            {
+                builder.append('|');
+            }
+        }
+
+        return builder.toString();
+    }
+
+    /**
+     * Add the publications for sending consensus messages to the other members of the cluster.
+     *
+     * @param members              of the cluster.
+     * @param thisMember           this member when adding publications.
+     * @param channelTemplate      for the publications.
+     * @param streamId             for the publications.
+     * @param bindConsensusControl if the control endpoint should be bound for the publication.
+     * @param aeron                to add the publications to.
+     * @param errorHandler         to log registration exceptions to.
+     */
+    public static void addConsensusPublications(
+        final ClusterMember[] members,
+        final ClusterMember thisMember,
+        final String channelTemplate,
+        final int streamId,
+        final boolean bindConsensusControl,
+        final Aeron aeron,
+        final ErrorHandler errorHandler)
+    {
+        final ChannelUri channelUri = ChannelUri.parse(channelTemplate);
+
         for (final ClusterMember member : members)
         {
-            if (member != exclude)
+            if (member.id != thisMember.id)
             {
-                channelUri.put(ENDPOINT_PARAM_NAME, member.memberFacingEndpoint());
-                member.publication = aeron.addExclusivePublication(channelUri.toString(), streamId);
+                channelUri.put(ENDPOINT_PARAM_NAME, member.consensusEndpoint);
+                setControlEndpoint(channelUri, bindConsensusControl, thisMember.consensusEndpoint);
+                member.consensusChannel = channelUri.toString();
+                tryAddPublication(member, streamId, aeron, errorHandler);
             }
         }
     }
 
     /**
-     * Close the publications associated with members of the cluster.
+     * Add an exclusive {@link Publication} for communicating to a member on the consensus channel.
      *
-     * @param clusterMembers to close the publications for.
+     * @param thisMember           from which the publication is addressed.
+     * @param otherMember          to which the publication is addressed.
+     * @param channelTemplate      for the target member.
+     * @param streamId             for the target member.
+     * @param bindConsensusControl if the control endpoint should be bound for the publication.
+     * @param aeron                from which the publication will be created.
+     * @param errorHandler         to log registration exceptions to.
      */
-    public static void closeMemberPublications(final ClusterMember[] clusterMembers)
+    public static void addConsensusPublication(
+        final ClusterMember thisMember,
+        final ClusterMember otherMember,
+        final String channelTemplate,
+        final int streamId,
+        final boolean bindConsensusControl,
+        final Aeron aeron,
+        final ErrorHandler errorHandler)
     {
-        for (final ClusterMember member : clusterMembers)
+        if (null == otherMember.consensusChannel)
         {
-            CloseHelper.close(member.publication);
+            final ChannelUri channelUri = ChannelUri.parse(channelTemplate);
+            channelUri.put(ENDPOINT_PARAM_NAME, otherMember.consensusEndpoint);
+            setControlEndpoint(channelUri, bindConsensusControl, thisMember.consensusEndpoint);
+            otherMember.consensusChannel = channelUri.toString();
+        }
+
+        tryAddPublication(otherMember, streamId, aeron, errorHandler);
+    }
+
+    /**
+     * Try and add an exclusive {@link Publication} for communicating to a member on the consensus channel.
+     *
+     * @param member       to which the publication is added.
+     * @param streamId     for the target member.
+     * @param aeron        from which the publication will be created.
+     * @param errorHandler to log registration exceptions to.
+     */
+    public static void tryAddPublication(
+        final ClusterMember member, final int streamId, final Aeron aeron, final ErrorHandler errorHandler)
+    {
+        try
+        {
+            member.publication = aeron.addExclusivePublication(member.consensusChannel, streamId);
+        }
+        catch (final RegistrationException ex)
+        {
+            errorHandler.onError(new ClusterEvent(
+                "failed to add consensus publication for member: " + member.id + " - " + ex.getMessage()));
         }
     }
 
     /**
-     * Add an exclusive {@link Publication} for communicating to a member on the member status channel.
+     * Close the publications associated with members of the cluster used for the consensus protocol.
      *
-     * @param member     to which the publication is addressed.
-     * @param channelUri for the target member.
-     * @param streamId   for the target member.
-     * @param aeron      from which the publication will be created.
+     * @param errorHandler   to capture errors during close.
+     * @param clusterMembers to close the publications for.
      */
-    public static void addMemberStatusPublication(
-        final ClusterMember member, final ChannelUri channelUri, final int streamId, final Aeron aeron)
+    public static void closeConsensusPublications(final ErrorHandler errorHandler, final ClusterMember[] clusterMembers)
     {
-        channelUri.put(ENDPOINT_PARAM_NAME, member.memberFacingEndpoint());
-        member.publication = aeron.addExclusivePublication(channelUri.toString(), streamId);
+        for (final ClusterMember member : clusterMembers)
+        {
+            member.closePublication(errorHandler);
+        }
     }
 
     /**
@@ -651,7 +813,7 @@ public final class ClusterMember
     {
         for (final ClusterMember member : clusterMembers)
         {
-            clusterMemberByIdMap.put(member.id(), member);
+            clusterMemberByIdMap.put(member.id, member);
         }
     }
 
@@ -660,7 +822,7 @@ public final class ClusterMember
      *
      * @param clusterMembers for the current cluster.
      * @param nowNs          for the current time.
-     * @param timeoutNs      after which a follower is not considered active.
+     * @param timeoutNs      after which a member is not considered active.
      * @return true if quorum of cluster members are considered active.
      */
     public static boolean hasActiveQuorum(
@@ -670,7 +832,7 @@ public final class ClusterMember
 
         for (final ClusterMember member : clusterMembers)
         {
-            if (member.isLeader() || nowNs <= (member.timeOfLastAppendPositionNs() + timeoutNs))
+            if (member.isActive(nowNs, timeoutNs))
             {
                 if (--threshold <= 0)
                 {
@@ -698,9 +860,12 @@ public final class ClusterMember
      *
      * @param members         of the cluster.
      * @param rankedPositions temp array to be used for sorting the positions to avoid allocation.
-     * @return the position reached by a quorum of cluster members.
+     * @param nowNs           for the current time.
+     * @param timeoutNs       after which a member is not considered active.
+     * @return the position reached by a quorum of active cluster members.
      */
-    public static long quorumPosition(final ClusterMember[] members, final long[] rankedPositions)
+    public static long quorumPosition(
+        final ClusterMember[] members, final long[] rankedPositions, final long nowNs, final long timeoutNs)
     {
         final int length = rankedPositions.length;
         for (int i = 0; i < length; i++)
@@ -710,16 +875,18 @@ public final class ClusterMember
 
         for (final ClusterMember member : members)
         {
-            long newPosition = member.logPosition;
-
-            for (int i = 0; i < length; i++)
+            if (member.isActive(nowNs, timeoutNs))
             {
-                final long rankedPosition = rankedPositions[i];
-
-                if (newPosition > rankedPosition)
+                long newPosition = member.logPosition;
+                for (int i = 0; i < length; i++)
                 {
-                    rankedPositions[i] = newPosition;
-                    newPosition = rankedPosition;
+                    final long rankedPosition = rankedPositions[i];
+
+                    if (newPosition > rankedPosition)
+                    {
+                        rankedPositions[i] = newPosition;
+                        newPosition = rankedPosition;
+                    }
                 }
             }
         }
@@ -728,39 +895,33 @@ public final class ClusterMember
     }
 
     /**
-     * Reset the log position of all the members to the provided value.
-     *
-     * @param clusterMembers to be reset.
-     * @param logPosition    to set for them all.
-     */
-    public static void resetLogPositions(final ClusterMember[] clusterMembers, final long logPosition)
-    {
-        for (final ClusterMember member : clusterMembers)
-        {
-            member.logPosition(logPosition);
-        }
-    }
-
-    /**
-     * Has the members of the cluster the voted reached the provided position in their log.
+     * Has a quorum of members of appended a position to their local log.
      *
      * @param clusterMembers   to check.
-     * @param position         to compare the {@link #logPosition()} against.
      * @param leadershipTermId expected of the members.
-     * @return true if all members have reached this position otherwise false.
+     * @param position         to compare the {@link #logPosition()} against.
+     * @param nowNs            for the current time.
+     * @param timeoutNs        after which a member is not considered active.
+     * @return {@code true} if a quorum of members reached this position otherwise {@code false}.
      */
-    public static boolean haveVotersReachedPosition(
-        final ClusterMember[] clusterMembers, final long position, final long leadershipTermId)
+    public static boolean hasQuorumAtPosition(
+        final ClusterMember[] clusterMembers,
+        final long leadershipTermId,
+        final long position,
+        final long nowNs,
+        final long timeoutNs)
     {
+        int votes = 0;
+
         for (final ClusterMember member : clusterMembers)
         {
-            if (member.vote != null && (member.logPosition < position || member.leadershipTermId != leadershipTermId))
+            if (member.hasReachedPosition(leadershipTermId, position, nowNs, timeoutNs))
             {
-                return false;
+                ++votes;
             }
         }
 
-        return true;
+        return votes >= ClusterMember.quorumThreshold(clusterMembers.length);
     }
 
     /**
@@ -797,77 +958,77 @@ public final class ClusterMember
             else
             {
                 member.vote(null)
-                    .candidateTermId(Aeron.NULL_VALUE)
+                    .candidateTermId(NULL_VALUE)
                     .isBallotSent(false);
             }
         }
     }
 
     /**
-     * Has the candidate got unanimous support of the cluster?
+     * Is a member considered unanimously to be leader after voting.
+     * <p>
+     * If a leader has been gracefully closed then it is not included in the membership for considering a unanimous
+     * position but will be considered in the membership for quorum.
+     * <p>
+     * <em>Note: all members are considered (i.e. no {@link #isActive(long, long)} check), because this method is called
+     * during {@link ElectionState#CANDIDATE_BALLOT} phase before append position is notified from the followers.</em>
      *
-     * @param members         to check for votes.
-     * @param candidateTermId for the vote.
-     * @return false if any member has not voted for the candidate.
+     * @param clusterMembers         to check for votes.
+     * @param candidateTermId        for the vote.
+     * @param gracefulClosedLeaderId id of a leader if gracefully closed otherwise {@link Aeron#NULL_VALUE}.
+     * @return {@code true} if all members voted positively.
      */
-    public static boolean hasWonVoteOnFullCount(final ClusterMember[] members, final long candidateTermId)
+    public static boolean isUnanimousLeader(
+        final ClusterMember[] clusterMembers, final long candidateTermId, final int gracefulClosedLeaderId)
     {
         int votes = 0;
 
-        for (final ClusterMember member : members)
+        for (final ClusterMember member : clusterMembers)
         {
-            if (null == member.vote || member.candidateTermId != candidateTermId)
+            if (member.id == gracefulClosedLeaderId)
+            {
+                continue;
+            }
+
+            if (candidateTermId != member.candidateTermId || !Boolean.TRUE.equals(member.vote))
             {
                 return false;
             }
 
-            votes += member.vote ? 1 : 0;
+            votes++;
         }
 
-        return votes >= ClusterMember.quorumThreshold(members.length);
+        return votes >= ClusterMember.quorumThreshold(clusterMembers.length);
     }
 
     /**
-     * Has sufficient votes being counted for a majority for all members observed during {@link Election.State#CANVASS}?
-     *
-     * @param members         to check for votes.
-     * @param candidateTermId for the vote.
-     * @return false if any member has not voted for the candidate.
-     */
-    public static boolean hasMajorityVoteWithCanvassMembers(final ClusterMember[] members, final long candidateTermId)
-    {
-        int votes = 0;
-        for (final ClusterMember member : members)
-        {
-            if (NULL_POSITION != member.logPosition && null == member.vote)
-            {
-                return false;
-            }
-
-            if (Boolean.TRUE.equals(member.vote) && member.candidateTermId == candidateTermId)
-            {
-                ++votes;
-            }
-        }
-
-        return votes >= ClusterMember.quorumThreshold(members.length);
-    }
-
-    /**
-     * Has sufficient votes being counted for a majority?
+     * Is this member considered leader by a quorum of members by having positive votes being counted for a majority
+     * and no negative votes.
+     * <p>
+     * <em>Note: all members are considered (i.e. no {@link #isActive(long, long)} check), because this method is called
+     * during {@link ElectionState#CANDIDATE_BALLOT} phase before append position is notified from the followers.</em>
      *
      * @param clusterMembers  to check for votes.
      * @param candidateTermId for the vote.
-     * @return true if a majority of positive votes.
+     * @return {@code true} if sufficient positive votes being counted for a majority and no negative votes.
      */
-    public static boolean hasMajorityVote(final ClusterMember[] clusterMembers, final long candidateTermId)
+    public static boolean isQuorumLeader(final ClusterMember[] clusterMembers, final long candidateTermId)
     {
         int votes = 0;
+
         for (final ClusterMember member : clusterMembers)
         {
-            if (Boolean.TRUE.equals(member.vote) && member.candidateTermId == candidateTermId)
+            if (candidateTermId == member.candidateTermId)
             {
-                ++votes;
+                if (Boolean.FALSE.equals(member.vote))
+                {
+                    return false;
+                }
+
+                if (Boolean.TRUE.equals(member.vote))
+                {
+                    ++votes;
+                }
             }
         }
 
@@ -898,7 +1059,7 @@ public final class ClusterMember
                 throw new ClusterException("memberId=" + memberId + " not found in clusterMembers");
             }
 
-            if (!"".equals(memberEndpoints))
+            if (!memberEndpoints.isEmpty())
             {
                 ClusterMember.validateMemberEndpoints(member, memberEndpoints);
             }
@@ -908,58 +1069,72 @@ public final class ClusterMember
     }
 
     /**
-     * Check the member with the memberEndpoints
+     * Check the member with the memberEndpoints.
      *
-     * @param member          to check memberEndpoints against
-     * @param memberEndpoints to check member against
+     * @param member          to check memberEndpoints against.
+     * @param memberEndpoints to check member against.
      * @see ConsensusModule.Context#memberEndpoints()
      * @see ConsensusModule.Context#clusterMembers()
      */
     public static void validateMemberEndpoints(final ClusterMember member, final String memberEndpoints)
     {
-        final ClusterMember endpointMember = ClusterMember.parseEndpoints(Aeron.NULL_VALUE, memberEndpoints);
+        final ClusterMember endpoints = ClusterMember.parseEndpoints(NULL_VALUE, memberEndpoints);
 
-        if (!areSameEndpoints(member, endpointMember))
+        if (!areSameEndpoints(member, endpoints))
         {
             throw new ClusterException(
-                "clusterMembers and memberEndpoints differ: " + member.endpointsDetail() + " != " + memberEndpoints);
+                "clusterMembers and endpoints differ: " + member.endpoints + " != " + memberEndpoints);
         }
     }
 
     /**
      * Are two cluster members using the same endpoints?
      *
-     * @param lhs to check
-     * @param rhs to check
+     * @param lhs to compare for equality.
+     * @param rhs to compare for equality.
      * @return true if both are using the same endpoints or false if not.
      */
     public static boolean areSameEndpoints(final ClusterMember lhs, final ClusterMember rhs)
     {
-        return lhs.clientFacingEndpoint().equals(rhs.clientFacingEndpoint()) &&
-            lhs.memberFacingEndpoint().equals(rhs.memberFacingEndpoint()) &&
-            lhs.logEndpoint().equals(rhs.logEndpoint()) &&
-            lhs.transferEndpoint().equals(rhs.transferEndpoint()) &&
-            lhs.archiveEndpoint().equals(rhs.archiveEndpoint());
+        return lhs.ingressEndpoint.equals(rhs.ingressEndpoint) &&
+            lhs.consensusEndpoint.equals(rhs.consensusEndpoint) &&
+            lhs.logEndpoint.equals(rhs.logEndpoint) &&
+            lhs.catchupEndpoint.equals(rhs.catchupEndpoint) &&
+            lhs.archiveEndpoint.equals(rhs.archiveEndpoint);
     }
 
     /**
-     * Has the member achieved a unanimous view to be a suitable candidate in an election.
+     * Is the member considered a candidate by a unanimous view to be a suitable candidate in an election.
+     * <p>
+     * If a leader has been gracefully closed then it is not included in the membership for considering a unanimous
+     * position but will be considered in the membership for quorum.
      *
-     * @param clusterMembers to compare the candidate against.
-     * @param candidate      for leadership.
+     * @param clusterMembers         to compare the candidate against.
+     * @param candidate              for leadership.
+     * @param gracefulClosedLeaderId id of a leader if gracefully closed otherwise {@link Aeron#NULL_VALUE}.
      * @return true if the candidate is suitable otherwise false.
      */
-    public static boolean isUnanimousCandidate(final ClusterMember[] clusterMembers, final ClusterMember candidate)
+    public static boolean isUnanimousCandidate(
+        final ClusterMember[] clusterMembers, final ClusterMember candidate, final int gracefulClosedLeaderId)
     {
+        int possibleVotes = 0;
+
         for (final ClusterMember member : clusterMembers)
         {
-            if (NULL_POSITION == member.logPosition || compareLog(candidate, member) < 0)
+            if (member.id == gracefulClosedLeaderId)
+            {
+                continue;
+            }
+
+            if (!member.willVoteFor(candidate))
             {
                 return false;
             }
+
+            possibleVotes++;
         }
 
-        return true;
+        return possibleVotes >= ClusterMember.quorumThreshold(clusterMembers.length);
     }
 
     /**
@@ -972,14 +1147,13 @@ public final class ClusterMember
     public static boolean isQuorumCandidate(final ClusterMember[] clusterMembers, final ClusterMember candidate)
     {
         int possibleVotes = 0;
+
         for (final ClusterMember member : clusterMembers)
         {
-            if (NULL_POSITION == member.logPosition || compareLog(candidate, member) < 0)
+            if (member.willVoteFor(candidate))
             {
-                continue;
+                ++possibleVotes;
             }
-
-            ++possibleVotes;
         }
 
         return possibleVotes >= ClusterMember.quorumThreshold(clusterMembers.length);
@@ -1037,49 +1211,6 @@ public final class ClusterMember
     }
 
     /**
-     * Is the string of member endpoints not duplicated in the members.
-     *
-     * @param members         to check if the provided endpoints have a duplicate.
-     * @param memberEndpoints to check for duplicates.
-     * @return true if no duplicate is found otherwise false.
-     */
-    public static boolean isNotDuplicateEndpoint(final ClusterMember[] members, final String memberEndpoints)
-    {
-        for (final ClusterMember member : members)
-        {
-            if (member.endpointsDetail().equals(memberEndpoints))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /**
-     * Find the index at which a member id is present.
-     *
-     * @param clusterMembers to be searched.
-     * @param memberId       to search for.
-     * @return the index at which the member id is found otherwise {@link ArrayUtil#UNKNOWN_INDEX}.
-     */
-    public static int findMemberIndex(final ClusterMember[] clusterMembers, final int memberId)
-    {
-        final int length = clusterMembers.length;
-        int index = ArrayUtil.UNKNOWN_INDEX;
-
-        for (int i = 0; i < length; i++)
-        {
-            if (clusterMembers[i].id() == memberId)
-            {
-                index = i;
-            }
-        }
-
-        return index;
-    }
-
-    /**
      * Find a {@link ClusterMember} with a given id.
      *
      * @param clusterMembers to search.
@@ -1090,7 +1221,7 @@ public final class ClusterMember
     {
         for (final ClusterMember member : clusterMembers)
         {
-            if (member.id() == memberId)
+            if (memberId == member.id)
             {
                 return member;
             }
@@ -1100,54 +1231,12 @@ public final class ClusterMember
     }
 
     /**
-     * Add a new member to an array of {@link ClusterMember}s.
+     * Create a string of ingress endpoints by member id in format {@code id=endpoint,id=endpoint, ...}.
      *
-     * @param oldMembers to add to.
-     * @param newMember  to add.
-     * @return a new array containing the old members plus the new member.
+     * @param members for which the ingress endpoints string will be generated.
+     * @return a string of ingress endpoints by id.
      */
-    public static ClusterMember[] addMember(final ClusterMember[] oldMembers, final ClusterMember newMember)
-    {
-        return ArrayUtil.add(oldMembers, newMember);
-    }
-
-    /**
-     * Remove a member from an array if found, otherwise return the array unmodified.
-     *
-     * @param oldMembers to remove a member from.
-     * @param memberId   of the member to remove.
-     * @return a new array with the member removed or the existing array if not found.
-     */
-    public static ClusterMember[] removeMember(final ClusterMember[] oldMembers, final int memberId)
-    {
-        return ArrayUtil.remove(oldMembers, findMemberIndex(oldMembers, memberId));
-    }
-
-    /**
-     * Find the highest member id in an array of members.
-     *
-     * @param clusterMembers to search for the highest id.
-     * @return the highest id otherwise {@link Aeron#NULL_VALUE} if empty.
-     */
-    public static int highMemberId(final ClusterMember[] clusterMembers)
-    {
-        int highId = Aeron.NULL_VALUE;
-
-        for (final ClusterMember member : clusterMembers)
-        {
-            highId = Math.max(highId, member.id());
-        }
-
-        return highId;
-    }
-
-    /**
-     * Create a string of member facing endpoints by id in format {@code id=endpoint,id=endpoint, ...}.
-     *
-     * @param members for which the endpoints string will be generated.
-     * @return  a string of member facing endpoints by id.
-     */
-    public static String clientFacingEndpoints(final ClusterMember[] members)
+    public static String ingressEndpoints(final ClusterMember[] members)
     {
         final StringBuilder builder = new StringBuilder(100);
 
@@ -1159,32 +1248,82 @@ public final class ClusterMember
             }
 
             final ClusterMember member = members[i];
-            builder.append(member.id()).append('=').append(member.clientFacingEndpoint());
+            builder.append(member.id).append('=').append(member.ingressEndpoint);
         }
 
         return builder.toString();
     }
 
+    /**
+     * Run through the list of cluster members and set the isLeader field based on the supplied leaderMemberId.
+     *
+     * @param clusterMembers list of cluster members.
+     * @param leaderMemberId memberId of the current leader.
+     */
+    public static void setIsLeader(final ClusterMember[] clusterMembers, final int leaderMemberId)
+    {
+        for (final ClusterMember clusterMember : clusterMembers)
+        {
+            clusterMember.isLeader(clusterMember.id() == leaderMemberId);
+        }
+    }
+
+    static void setControlEndpoint(final ChannelUri channelUri, final boolean shouldBind, final String endpoint)
+    {
+        if (!shouldBind)
+        {
+            return;
+        }
+
+        final String controlEndpoint = replacePortWithWildcard(endpoint);
+        if (null == controlEndpoint)
+        {
+            return;
+        }
+
+        channelUri.put(MDC_CONTROL_PARAM_NAME, controlEndpoint);
+    }
+
+    boolean isActive(final long nowNs, final long timeoutNs)
+    {
+        return timeOfLastAppendPositionNs + timeoutNs > nowNs;
+    }
+
+    boolean willVoteFor(final ClusterMember candidate)
+    {
+        // we do not check `isActive()` here, because doing so breaks the nomination phase whereby nodes will no longer
+        // propose themselves as candidates when `timeOfLastAppendPositionNs` on other nodes stops advancing (i.e.
+        // node crash, network partition etc.).
+        return logPosition != NULL_POSITION && compareLog(this, candidate) <= 0;
+    }
+
+    boolean hasReachedPosition(final long leadershipTermId, final long position, final long nowNs, final long timeoutNs)
+    {
+        return isActive(nowNs, timeoutNs) && leadershipTermId == this.leadershipTermId && logPosition >= position;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "ClusterMember{" +
-            "isBallotSent=" + isBallotSent +
+            "id=" + id +
+            ", isBallotSent=" + isBallotSent +
             ", isLeader=" + isLeader +
-            ", hasRequestedJoin=" + hasRequestedJoin +
-            ", id=" + id +
             ", leadershipTermId=" + leadershipTermId +
             ", logPosition=" + logPosition +
             ", candidateTermId=" + candidateTermId +
             ", catchupReplaySessionId=" + catchupReplaySessionId +
             ", correlationId=" + changeCorrelationId +
-            ", removalPosition=" + removalPosition +
             ", timeOfLastAppendPositionNs=" + timeOfLastAppendPositionNs +
-            ", clientFacingEndpoint='" + clientFacingEndpoint + '\'' +
-            ", memberFacingEndpoint='" + memberFacingEndpoint + '\'' +
+            ", ingressEndpoint='" + ingressEndpoint + '\'' +
+            ", consensusEndpoint='" + consensusEndpoint + '\'' +
             ", logEndpoint='" + logEndpoint + '\'' +
-            ", transferEndpoint='" + transferEndpoint + '\'' +
+            ", catchupEndpoint='" + catchupEndpoint + '\'' +
             ", archiveEndpoint='" + archiveEndpoint + '\'' +
-            ", endpointsDetail='" + endpointsDetail + '\'' +
+            ", endpoints='" + endpoints + '\'' +
             ", publication=" + publication +
             ", vote=" + vote +
             '}';

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,74 @@ package io.aeron.archive;
  */
 public class RecordingSummary
 {
+    /**
+     * Unique identity of a recording.
+     */
     public long recordingId;
+
+    /**
+     * Start position of a recording captured by the archive.
+     */
     public long startPosition;
+
+    /**
+     * Stop position of a recording. This can be {@link io.aeron.archive.client.AeronArchive#NULL_POSITION} if active.
+     */
     public long stopPosition;
+
+    /**
+     * The initial-term-id for the recorded stream.
+     */
     public int initialTermId;
+
+    /**
+     * Length of the segment files for the stream which are a multiple of term-length.
+     */
     public int segmentFileLength;
+
+    /**
+     * The term-length for the recorded stream.
+     */
     public int termBufferLength;
+
+    /**
+     * UDP datagram length, or MTU, of the recording. Beyond this value messages are fragmented.
+     */
     public int mtuLength;
+
+    /**
+     * The session-id of the recorded stream which is updated if the recording is extended.
+     */
     public int sessionId;
+
+    /**
+     * The stream-id of the recorded stream.
+     */
     public int streamId;
+
+    /**
+     * Default constructor.
+     */
+    public RecordingSummary()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "RecordingSummary{" +
+            "recordingId=" + recordingId +
+            ", startPosition=" + startPosition +
+            ", stopPosition=" + stopPosition +
+            ", initialTermId=" + initialTermId +
+            ", segmentFileLength=" + segmentFileLength +
+            ", termBufferLength=" + termBufferLength +
+            ", mtuLength=" + mtuLength +
+            ", sessionId=" + sessionId +
+            ", streamId=" + streamId +
+            '}';
+    }
 }

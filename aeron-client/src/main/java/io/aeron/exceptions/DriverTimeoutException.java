@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,13 @@ package io.aeron.exceptions;
  */
 public class DriverTimeoutException extends TimeoutException
 {
+    private static final long serialVersionUID = -334819963402642904L;
+
+    /**
+     * Construct the exception for driver timeout due to lack of heartbeat.
+     *
+     * @param message detail for the exception.
+     */
     public DriverTimeoutException(final String message)
     {
         super(message, Category.FATAL);

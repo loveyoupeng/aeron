@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,9 +23,9 @@ import io.aeron.exceptions.AeronException;
 public enum ErrorCode
 {
     /**
-     * Aeron encountered an error condition.
+     * Old generic value, no longer used (0 value clashes with success). Retained for version compatibility.
      */
-    GENERIC_ERROR(0),
+    UNUSED(0),
 
     /**
      * A failure occurred creating a new channel or parsing the channel string.
@@ -66,6 +66,36 @@ public enum ErrorCode
      * Attempted to send a command known by the driver, but not currently supported.
      */
     NOT_SUPPORTED(8),
+
+    /**
+     * Attempted to send a command that had a hostname that could not be resolved.
+     */
+    UNKNOWN_HOST(9),
+
+    /**
+     * Attempted to send a command that referred to a resource that currently was unavailable.
+     */
+    RESOURCE_TEMPORARILY_UNAVAILABLE(10),
+
+    /**
+     * Aeron encountered an error condition.
+     */
+    GENERIC_ERROR(11),
+
+    /**
+     * Aeron encountered insufficient storage space while adding a resource.
+     */
+    STORAGE_SPACE(12),
+
+    /**
+     * An image was rejected.
+     */
+    IMAGE_REJECTED(13),
+
+    /**
+     * A publication was revoked.
+     */
+    PUBLICATION_REVOKED(14),
 
     // *** Insert new codes above here.
 
@@ -124,7 +154,7 @@ public enum ErrorCode
      */
     public static ErrorCode get(final int value)
     {
-        if (value >= 0 && value < (ERROR_CODES.length - 2))
+        if (0 <= value && value <= (ERROR_CODES.length - 2))
         {
             return ERROR_CODES[value];
         }

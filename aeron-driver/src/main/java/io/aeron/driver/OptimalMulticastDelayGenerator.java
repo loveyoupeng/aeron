@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,7 +65,6 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
 
     /**
      * Create new feedback delay generator based on estimates. Pre-calculating some parameters upfront.
-     * <p>
      *
      * @param maxBackoffT of the delay interval
      * @param groupSize   estimate
@@ -83,17 +82,10 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
     /**
      * {@inheritDoc}
      */
-    public long generateDelay()
+    @Override
+    public long generateDelayNs()
     {
         return (long)generateNewOptimalDelay();
-    }
-
-    /**
-     * {@inheritDoc}
-     */
-    public boolean shouldFeedbackImmediately()
-    {
-        return false;
     }
 
     /**
@@ -109,7 +101,7 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
     }
 
     /**
-     * Return uniform random value in the range 0..max
+     * Return uniform random value in the range 0 to max.
      *
      * @param max of the random range
      * @return random value
@@ -119,6 +111,10 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
         return ThreadLocalRandom.current().nextDouble() * max;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "OptimalMulticastDelayGenerator{" +
@@ -126,7 +122,6 @@ public class OptimalMulticastDelayGenerator implements FeedbackDelayGenerator
             ", baseX=" + baseX +
             ", constantT=" + constantT +
             ", factorT=" + factorT +
-            ", shouldFeedbackImmediately=" + shouldFeedbackImmediately() +
             '}';
     }
 }

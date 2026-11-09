@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,56 +20,73 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.LogBufferDescriptor;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Test;
-import org.junit.experimental.theories.DataPoint;
-import org.junit.experimental.theories.Theories;
-import org.junit.experimental.theories.Theory;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.is;
+import static java.util.Arrays.asList;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@RunWith(Theories.class)
-public class PublicationUnblockTest
+@ExtendWith(InterruptingTestCallback.class)
+class PublicationUnblockTest
 {
-    @DataPoint
-    public static final String NETWORK_CHANNEL = "aeron:udp?endpoint=localhost:54325";
-
-    @DataPoint
-    public static final String IPC_CHANNEL = "aeron:ipc";
-
-    private static final int STREAM_ID = 1;
-    private static final int FRAGMENT_COUNT_LIMIT = 10;
-
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .threadingMode(ThreadingMode.SHARED)
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnShutdown(true)
-        .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-        .clientLivenessTimeoutNs(TimeUnit.MILLISECONDS.toNanos(400))
-        .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(10))
-        .publicationUnblockTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500)));
-
-    private final Aeron aeron = Aeron.connect(new Aeron.Context()
-        .keepAliveIntervalNs(TimeUnit.MILLISECONDS.toNanos(100)));
-
-    @After
-    public void after()
+    private static List<String> channels()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        return asList(
+            "aeron:udp?endpoint=localhost:24325",
+            "aeron:ipc");
     }
 
-    @Theory
-    @Test(timeout = 10_000)
-    public void shouldUnblockNonCommittedMessage(final String channel)
+    private static final int STREAM_ID = 1001;
+    private static final int FRAGMENT_COUNT_LIMIT = 10;
+
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
+
+    private TestMediaDriver driver;
+    private Aeron aeron;
+
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .threadingMode(ThreadingMode.SHARED)
+                .errorHandler(Tests::onError)
+                .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
+                .clientLivenessTimeoutNs(TimeUnit.MILLISECONDS.toNanos(400))
+                .timerIntervalNs(TimeUnit.MILLISECONDS.toNanos(10))
+                .publicationUnblockTimeoutNs(TimeUnit.MILLISECONDS.toNanos(500)),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect(new Aeron.Context()
+            .keepAliveIntervalNs(TimeUnit.MILLISECONDS.toNanos(100)));
+    }
+
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @ParameterizedTest
+    @MethodSource("channels")
+    @InterruptAfter(10)
+    void shouldUnblockNonCommittedMessage(final String channel)
     {
         final MutableInteger fragmentCount = new MutableInteger();
         final FragmentHandler fragmentHandler = (buffer, offset, length, header) -> fragmentCount.value++;
@@ -85,8 +102,7 @@ public class PublicationUnblockTest
 
             while (publicationOne.tryClaim(length, bufferClaim) < 0L)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             bufferClaim.buffer().setMemory(bufferClaim.offset(), length, (byte)65);
@@ -94,20 +110,17 @@ public class PublicationUnblockTest
 
             while (publicationTwo.offer(srcBuffer, 0, length) < 0L)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             while (publicationOne.tryClaim(length, bufferClaim) < 0L)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             while (publicationTwo.offer(srcBuffer, 0, length) < 0L)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             final int expectedFragments = 3;
@@ -117,16 +130,15 @@ public class PublicationUnblockTest
                 final int fragments = subscription.poll(fragmentHandler, FRAGMENT_COUNT_LIMIT);
                 if (fragments == 0)
                 {
-                    Thread.yield();
-                    SystemTest.checkInterruptedStatus();
+                    Tests.yield();
                 }
 
                 numFragments += fragments;
             }
             while (numFragments < expectedFragments);
 
-            assertThat(numFragments, is(expectedFragments));
-            assertThat(fragmentCount.value, is(expectedFragments));
+            assertEquals(expectedFragments, numFragments);
+            assertEquals(expectedFragments, fragmentCount.value);
         }
     }
 }

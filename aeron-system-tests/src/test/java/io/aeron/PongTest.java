@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,32 +21,32 @@ import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.SlowTest;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.collections.MutableInteger;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Ignore;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.concurrent.TimeUnit;
 
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.*;
 
-public class PongTest
+class PongTest
 {
-    private static final String PING_URI = "aeron:udp?endpoint=localhost:54325";
-    private static final String PONG_URI = "aeron:udp?endpoint=localhost:54326";
+    private static final String PING_URI = "aeron:udp?endpoint=localhost:24325";
+    private static final String PONG_URI = "aeron:udp?endpoint=localhost:24326";
 
-    private static final int PING_STREAM_ID = 1;
-    private static final int PONG_STREAM_ID = 2;
+    private static final int PING_STREAM_ID = 1001;
+    private static final int PONG_STREAM_ID = 1002;
 
     private Aeron pingClient;
     private Aeron pongClient;
@@ -59,15 +59,19 @@ public class PongTest
     private final UnsafeBuffer buffer = new UnsafeBuffer(new byte[4096]);
     private final FragmentHandler pongHandler = mock(FragmentHandler.class);
 
-    @Before
-    public void before()
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
+
+    @BeforeEach
+    void before()
     {
         driver = TestMediaDriver.launch(
             new MediaDriver.Context()
-                .errorHandler(Throwable::printStackTrace)
-                .dirDeleteOnShutdown(true)
+                .errorHandler(Tests::onError)
                 .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-                .threadingMode(ThreadingMode.SHARED));
+                .threadingMode(ThreadingMode.SHARED),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
 
         pingClient = Aeron.connect();
         pongClient = Aeron.connect();
@@ -79,28 +83,25 @@ public class PongTest
         pongPublication = pongClient.addPublication(PONG_URI, PONG_STREAM_ID);
     }
 
-    @After
-    public void after()
+    @AfterEach
+    void after()
     {
-        CloseHelper.close(pongClient);
-        CloseHelper.close(pingClient);
-        CloseHelper.close(driver);
+        CloseHelper.closeAll(pongClient, pingClient, driver);
     }
 
     @Test
-    public void playPingPong()
+    void playPingPong()
     {
         buffer.putInt(0, 1);
 
         while (pingPublication.offer(buffer, 0, BitUtil.SIZE_OF_INT) < 0L)
         {
-            Thread.yield();
-            SystemTest.checkInterruptedStatus();
+            Tests.yield();
         }
 
         final MutableInteger fragmentsRead = new MutableInteger();
 
-        SystemTest.executeUntil(
+        Tests.executeUntil(
             () -> fragmentsRead.get() > 0,
             (i) ->
             {
@@ -112,7 +113,7 @@ public class PongTest
 
         fragmentsRead.set(0);
 
-        SystemTest.executeUntil(
+        Tests.executeUntil(
             () -> fragmentsRead.get() > 0,
             (i) ->
             {
@@ -129,21 +130,21 @@ public class PongTest
             any(Header.class));
     }
 
-    @Ignore
+    @SlowTest
     @Test
-    public void playPingPongWithRestart() throws Exception
+    @InterruptAfter(20)
+    void playPingPongWithRestart()
     {
         buffer.putInt(0, 1);
 
         while (pingPublication.offer(buffer, 0, BitUtil.SIZE_OF_INT) < 0L)
         {
-            Thread.yield();
-            SystemTest.checkInterruptedStatus();
+            Tests.yield();
         }
 
         final MutableInteger fragmentsRead = new MutableInteger();
 
-        SystemTest.executeUntil(
+        Tests.executeUntil(
             () -> fragmentsRead.get() > 0,
             (i) ->
             {
@@ -155,7 +156,7 @@ public class PongTest
 
         fragmentsRead.set(0);
 
-        SystemTest.executeUntil(
+        Tests.executeUntil(
             () -> fragmentsRead.get() > 0,
             (i) ->
             {
@@ -172,8 +173,7 @@ public class PongTest
         // wait for disconnect to ensure we stay in lock step
         while (pingPublication.isConnected())
         {
-            Thread.sleep(100);
-            SystemTest.checkInterruptedStatus();
+            Tests.sleep(10);
         }
 
         // restart Pong side
@@ -184,11 +184,10 @@ public class PongTest
 
         while (pingPublication.offer(buffer, 0, BitUtil.SIZE_OF_INT) < 0L)
         {
-            Thread.yield();
-            SystemTest.checkInterruptedStatus();
+            Tests.yield();
         }
 
-        SystemTest.executeUntil(
+        Tests.executeUntil(
             () -> fragmentsRead.get() > 0,
             (i) ->
             {
@@ -200,7 +199,7 @@ public class PongTest
 
         fragmentsRead.set(0);
 
-        SystemTest.executeUntil(
+        Tests.executeUntil(
             () -> fragmentsRead.get() > 0,
             (i) ->
             {
@@ -217,13 +216,11 @@ public class PongTest
             any(Header.class));
     }
 
-    public void echoPingHandler(
-        final DirectBuffer buffer, final int offset, final int length, @SuppressWarnings("unused") final Header header)
+    void echoPingHandler(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         while (pongPublication.offer(buffer, offset, length) < 0L)
         {
-            Thread.yield();
-            SystemTest.checkInterruptedStatus();
+            Tests.yield();
         }
     }
 }

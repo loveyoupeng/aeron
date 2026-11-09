@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,41 +18,60 @@ package io.aeron;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.protocol.DataHeaderFlyweight;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.nio.ByteBuffer;
 
 import static io.aeron.Publication.MAX_POSITION_EXCEEDED;
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class MaxPositionPublicationTest
+@ExtendWith(InterruptingTestCallback.class)
+class MaxPositionPublicationTest
 {
-    private static final int STREAM_ID = 7;
+    private static final int STREAM_ID = 1007;
     private static final int MESSAGE_LENGTH = 32;
 
     private final UnsafeBuffer srcBuffer = new UnsafeBuffer(ByteBuffer.allocate(MESSAGE_LENGTH));
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnStart(true)
-        .dirDeleteOnShutdown(true)
-        .threadingMode(ThreadingMode.SHARED));
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final Aeron aeron = Aeron.connect();
+    private TestMediaDriver driver;
+    private Aeron aeron;
 
-    @After
-    public void after()
+    @BeforeEach
+    void setUp()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .errorHandler(Tests::onError)
+                .dirDeleteOnStart(true)
+                .threadingMode(ThreadingMode.SHARED),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldPublishFromExclusivePublication()
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldPublishFromExclusivePublication()
     {
         final int initialTermId = -777;
         final int termLength = 64 * 1024;
@@ -68,11 +87,7 @@ public class MaxPositionPublicationTest
         try (Subscription subscription = aeron.addSubscription(channelUri, STREAM_ID);
             ExclusivePublication publication = aeron.addExclusivePublication(channelUri, STREAM_ID))
         {
-            while (!subscription.isConnected())
-            {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
-            }
+            Tests.awaitConnected(subscription);
 
             assertEquals(lastMessagePosition, publication.position());
             assertEquals(lastMessagePosition, subscription.imageAtIndex(0).joinPosition());
@@ -80,8 +95,7 @@ public class MaxPositionPublicationTest
             long resultingPosition = publication.offer(srcBuffer, 0, MESSAGE_LENGTH);
             while (resultingPosition < 0)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
                 resultingPosition = publication.offer(srcBuffer, 0, MESSAGE_LENGTH);
             }
 

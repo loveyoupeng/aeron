@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -77,7 +77,7 @@ public class LossDetector implements TermGapScanner.GapHandler
         final int initialTermId)
     {
         boolean lossFound = false;
-        int rebuildOffset = (int)rebuildPosition & termLengthMask;
+        int rebuildOffset = (int)(rebuildPosition & termLengthMask);
 
         if (rebuildPosition < hwmPosition)
         {
@@ -85,13 +85,15 @@ public class LossDetector implements TermGapScanner.GapHandler
             final int hwmTermCount = (int)(hwmPosition >>> positionBitsToShift);
 
             final int rebuildTermId = initialTermId + rebuildTermCount;
-            final int hwmTermOffset = (int)hwmPosition & termLengthMask;
+            final int hwmTermOffset = (int)(hwmPosition & termLengthMask);
             final int limitOffset = rebuildTermCount == hwmTermCount ? hwmTermOffset : termLengthMask + 1;
 
             rebuildOffset = scanForGap(termBuffer, rebuildTermId, rebuildOffset, limitOffset, this);
             if (rebuildOffset < limitOffset)
             {
-                if (scannedTermOffset != activeTermOffset || scannedTermId != activeTermId)
+                if (scannedTermOffset != activeTermOffset ||
+                    scannedTermId != activeTermId ||
+                    scannedLength != activeLength)
                 {
                     activateGap(nowNs);
                     lossFound = true;
@@ -104,6 +106,10 @@ public class LossDetector implements TermGapScanner.GapHandler
         return pack(rebuildOffset, lossFound);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onGap(final int termId, final int offset, final int length)
     {
         scannedTermId = termId;
@@ -151,14 +157,7 @@ public class LossDetector implements TermGapScanner.GapHandler
         activeTermOffset = scannedTermOffset;
         activeLength = scannedLength;
 
-        if (delayGenerator.shouldFeedbackImmediately())
-        {
-            deadlineNs = nowNs;
-        }
-        else
-        {
-            deadlineNs = nowNs + delayGenerator.generateDelay();
-        }
+        deadlineNs = nowNs + delayGenerator.generateDelayNs();
     }
 
     private void checkTimerExpiry(final long nowNs)
@@ -166,7 +165,7 @@ public class LossDetector implements TermGapScanner.GapHandler
         if (deadlineNs - nowNs <= 0)
         {
             lossHandler.onGapDetected(activeTermId, activeTermOffset, activeLength);
-            deadlineNs = nowNs + delayGenerator.generateDelay();
+            deadlineNs = nowNs + delayGenerator.retryDelayNs();
         }
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,15 +17,7 @@
 #ifndef AERON_UDP_TRANSPORT_POLLER_H
 #define AERON_UDP_TRANSPORT_POLLER_H
 
-#if defined(HAVE_EPOLL)
-#include <sys/epoll.h>
-#elif defined(HAVE_POLL)
-#include <poll.h>
-#endif
-
-#include "media/aeron_udp_channel_transport.h"
-
-#define AERON_UDP_TRANSPORT_POLLER_ITERATION_THRESHOLD (5)
+#include "aeron_driver_conductor.h"
 
 typedef struct aeron_udp_channel_transport_entry_stct
 {
@@ -43,14 +35,17 @@ typedef struct aeron_udp_transport_poller_stct
     }
     transports;
 
-#if defined(HAVE_EPOLL)
-    int epoll_fd;
-    struct epoll_event *epoll_events;
-#elif defined(HAVE_POLL)
-    struct pollfd *pollfds;
-#endif
-
+    size_t iteration_threshold;
+    int32_t socket_poll_limit;
+    int fd;
     void *bindings_clientd;
+
+    /*
+     * Whether the transports are currently in `fd`'s epoll set. Below
+     * `poller->iteration_threshold` the poller never waits on epoll, so it does
+     * not register -- see `aeron_udp_transport_poller_add`.
+     */
+    int is_epoll_registered;
 }
 aeron_udp_transport_poller_t;
 
@@ -71,5 +66,15 @@ int aeron_udp_transport_poller_poll(
     aeron_udp_transport_recv_func_t recv_func,
     aeron_udp_channel_transport_recvmmsg_func_t recvmmsg_func,
     void *clientd);
+
+int aeron_udp_transport_poller_check_send_endpoint_re_resolutions(
+    aeron_udp_transport_poller_t *poller,
+    int64_t now_ns,
+    aeron_driver_conductor_proxy_t *conductor_proxy);
+
+int aeron_udp_transport_poller_check_receive_endpoint_re_resolutions(
+    aeron_udp_transport_poller_t *poller,
+    int64_t now_ns,
+    aeron_driver_conductor_proxy_t *conductor_proxy);
 
 #endif //AERON_UDP_TRANSPORT_POLLER_H

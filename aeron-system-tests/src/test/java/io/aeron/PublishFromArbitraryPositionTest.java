@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,60 +20,78 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TestWatcher;
-import org.junit.runner.Description;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.ExtensionContext;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.api.extension.TestWatcher;
 
 import java.nio.ByteBuffer;
 import java.util.Random;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 
-public class PublishFromArbitraryPositionTest
+@ExtendWith(InterruptingTestCallback.class)
+class PublishFromArbitraryPositionTest
 {
-    @Rule
-    public TestWatcher testWatcher = new TestWatcher()
-    {
-        protected void failed(final Throwable t, final Description description)
-        {
-            System.err.println(PublishFromArbitraryPositionTest.class.getName() + " failed with random seed: " + seed);
-        }
-    };
-
-    private static final int STREAM_ID = 7;
+    private static final int STREAM_ID = 1007;
     private static final int FRAGMENT_COUNT_LIMIT = 10;
     private static final int MAX_MESSAGE_LENGTH = 1024 - DataHeaderFlyweight.HEADER_LENGTH;
 
     private final FragmentHandler mockFragmentHandler = mock(FragmentHandler.class);
     private final UnsafeBuffer srcBuffer = new UnsafeBuffer(ByteBuffer.allocateDirect(MAX_MESSAGE_LENGTH));
-    private long seed;
+    private final long seed = System.nanoTime();
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnShutdown(true)
-        .threadingMode(ThreadingMode.SHARED));
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final Aeron aeron = Aeron.connect();
+    private TestMediaDriver driver;
 
-    @After
-    public void after()
+    private Aeron aeron;
+
+    @RegisterExtension
+    final TestWatcher randomSeedWatcher = new TestWatcher()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        public void testFailed(final ExtensionContext context, final Throwable cause)
+        {
+            System.err.println(context.getDisplayName() + " failed with random seed: " + seed);
+        }
+    };
+
+    @BeforeEach
+    void setUp()
+    {
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .errorHandler(Tests::onError)
+                .threadingMode(ThreadingMode.SHARED),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldPublishFromArbitraryJoinPosition() throws Exception
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldPublishFromArbitraryJoinPosition() throws InterruptedException
     {
         final Random rnd = new Random();
-        seed = System.nanoTime();
         rnd.setSeed(seed);
 
         final int termLength = 1 << (16 + rnd.nextInt(10)); // 64k to 64M
@@ -82,7 +100,7 @@ public class PublishFromArbitraryPositionTest
         final int termOffset = BitUtil.align(rnd.nextInt(termLength), FrameDescriptor.FRAME_ALIGNMENT);
         final int termId = initialTermId + rnd.nextInt(1000);
         final String channelUri = new ChannelUriStringBuilder()
-            .endpoint("localhost:54325")
+            .endpoint("localhost:24325")
             .termLength(termLength)
             .initialTermId(initialTermId)
             .termId(termId)
@@ -96,11 +114,7 @@ public class PublishFromArbitraryPositionTest
         try (Subscription subscription = aeron.addSubscription(channelUri, STREAM_ID);
             ExclusivePublication publication = aeron.addExclusivePublication(channelUri, STREAM_ID))
         {
-            while (!publication.isConnected())
-            {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
-            }
+            Tests.awaitConnected(publication);
 
             final Thread t = new Thread(
                 () ->
@@ -140,8 +154,7 @@ public class PublishFromArbitraryPositionTest
     {
         while (publication.offer(buffer, 0, 1 + rnd.nextInt(MAX_MESSAGE_LENGTH - 1)) < 0L)
         {
-            Thread.yield();
-            SystemTest.checkInterruptedStatus();
+            Tests.yield();
         }
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 
 /**
- * The aeron-archive is an module which enables Aeron data stream recording and replay from persistent storage.
+ * The aeron-archive is a module which enables Aeron data stream recording and replay from persistent storage.
  * <p>
  * Features:
  * <ul>

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,65 +15,140 @@
  */
 package io.aeron.archive;
 
-import io.aeron.Aeron;
 import org.agrona.concurrent.UnsafeBuffer;
 
 abstract class AbstractListRecordingsSession implements Session
 {
-    protected static final int MAX_SCANS_PER_WORK_CYCLE = 256;
+    static final int MAX_SCANS_PER_WORK_CYCLE = 64;
 
-    protected final UnsafeBuffer descriptorBuffer;
-    protected final Catalog catalog;
-    protected final ControlSession controlSession;
-    protected final ControlResponseProxy proxy;
-    protected final long correlationId;
-    protected boolean isDone = false;
+    private final UnsafeBuffer descriptorBuffer;
+    private final Catalog catalog;
+    private final int count;
+    private final ControlSession controlSession;
+    private final long correlationId;
+    private long recordingId;
+    private int sent;
+    private boolean isDone = false;
 
     AbstractListRecordingsSession(
         final long correlationId,
+        final long fromRecordingId,
+        final int count,
         final Catalog catalog,
-        final ControlResponseProxy proxy,
         final ControlSession controlSession,
         final UnsafeBuffer descriptorBuffer)
     {
         this.correlationId = correlationId;
+        this.recordingId = fromRecordingId;
+        this.count = count;
         this.controlSession = controlSession;
         this.catalog = catalog;
-        this.proxy = proxy;
         this.descriptorBuffer = descriptorBuffer;
     }
 
-    public void abort()
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void abort(final String reason)
     {
         isDone = true;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean isDone()
     {
         return isDone;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long sessionId()
     {
-        return Aeron.NULL_VALUE;
+        return correlationId;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public int doWork()
     {
-        int workCount = 0;
-
-        if (!isDone)
+        if (isDone)
         {
-            workCount += sendDescriptors();
+            return 0;
         }
 
-        return workCount;
+        final CatalogIndex catalogIndex = catalog.index();
+        final int lastPosition = catalogIndex.lastPosition();
+        final long[] index = catalogIndex.index();
+        int position = CatalogIndex.find(index, recordingId, lastPosition);
+
+        if (position < 0)
+        {
+            for (int i = 0; i <= lastPosition; i += 2)
+            {
+                if (index[i] >= recordingId)
+                {
+                    position = i;
+                    break;
+                }
+            }
+        }
+
+        final int batchStartPosition = position;
+        for (int recordsScanned = 0; sent < count && recordsScanned < MAX_SCANS_PER_WORK_CYCLE; recordsScanned++)
+        {
+            final boolean noMoreRecordings = position < 0 || position > lastPosition;
+            if (noMoreRecordings || catalog.wrapDescriptorAtOffset(descriptorBuffer, (int)index[position + 1]) < 0)
+            {
+                controlSession.sendRecordingUnknown(correlationId, noMoreRecordings ? recordingId : index[position]);
+                isDone = true;
+                break;
+            }
+
+            if (acceptDescriptor(descriptorBuffer))
+            {
+                if (!controlSession.sendDescriptor(correlationId, descriptorBuffer))
+                {
+                    isDone = controlSession.isDone();
+                    break;
+                }
+                ++sent;
+            }
+
+            if (position < lastPosition)
+            {
+                recordingId = index[position + 2];
+            }
+            else
+            {
+                recordingId++;
+            }
+            position += 2;
+        }
+
+        if (sent == count)
+        {
+            isDone = true;
+        }
+
+        return (position - batchStartPosition) / 2;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
         controlSession.activeListing(null);
     }
 
-    protected abstract int sendDescriptors();
+    abstract boolean acceptDescriptor(UnsafeBuffer descriptorBuffer);
 }

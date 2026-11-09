@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ public class RandomLossGenerator implements LossGenerator
     /**
      * Construct loss generator with given loss rate as percentage.
      *
-     * @param lossRate for generating loss
+     * @param lossRate for generating loss.
      */
     public RandomLossGenerator(final double lossRate)
     {
@@ -39,10 +39,10 @@ public class RandomLossGenerator implements LossGenerator
     }
 
     /**
-     * Construct loss generator with given loss rate as percentage and random seed
+     * Construct loss generator with given loss rate as percentage and random seed.
      *
-     * @param lossRate for generating loss
-     * @param lossSeed for random seeding
+     * @param lossRate for generating loss.
+     * @param lossSeed for random seeding.
      */
     public RandomLossGenerator(final double lossRate, final long lossSeed)
     {
@@ -50,6 +50,10 @@ public class RandomLossGenerator implements LossGenerator
         this.lossRate = lossRate;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean shouldDropFrame(final InetSocketAddress address, final UnsafeBuffer buffer, final int length)
     {
         return random.nextDouble() <= lossRate;

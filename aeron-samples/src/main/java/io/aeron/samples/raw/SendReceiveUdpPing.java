@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package io.aeron.samples.raw;
 import io.aeron.driver.Configuration;
 import org.HdrHistogram.Histogram;
 import org.agrona.BitUtil;
-import org.agrona.concurrent.SigInt;
+import org.agrona.SystemUtil;
+import org.agrona.concurrent.HighResolutionTimer;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -37,16 +39,35 @@ import static io.aeron.samples.raw.Common.init;
  */
 public class SendReceiveUdpPing
 {
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws IOException if an error occurs with the channel.
+     */
+    @SuppressWarnings("try")
     public static void main(final String[] args) throws IOException
     {
         int numChannels = 1;
-        if (1 == args.length)
+        if (1 <= args.length)
         {
             numChannels = Integer.parseInt(args[0]);
         }
 
-        final Histogram histogram = new Histogram(TimeUnit.SECONDS.toNanos(10), 3);
+        String remoteHost = "localhost";
+        if (2 <= args.length)
+        {
+            remoteHost = args[1];
+        }
 
+        if (SystemUtil.isWindows())
+        {
+            HighResolutionTimer.enable();
+        }
+
+        System.out.printf("Number of channels: %d, Remote host: %s%n", numChannels, remoteHost);
+
+        final Histogram histogram = new Histogram(TimeUnit.SECONDS.toNanos(10), 3);
         final ByteBuffer buffer = ByteBuffer.allocateDirect(Configuration.MTU_LENGTH_DEFAULT);
 
         final DatagramChannel[] receiveChannels = new DatagramChannel[numChannels];
@@ -54,23 +75,24 @@ public class SendReceiveUdpPing
         {
             receiveChannels[i] = DatagramChannel.open();
             init(receiveChannels[i]);
-            receiveChannels[i].bind(new InetSocketAddress("localhost", Common.PONG_PORT + i));
+            receiveChannels[i].bind(new InetSocketAddress("0.0.0.0", Common.PONG_PORT + i));
         }
 
-        final InetSocketAddress sendAddress = new InetSocketAddress("localhost", Common.PING_PORT);
+        final InetSocketAddress sendAddress = new InetSocketAddress(remoteHost, Common.PING_PORT);
         final DatagramChannel sendChannel = DatagramChannel.open();
         init(sendChannel);
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        while (running.get())
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            measureRoundTrip(histogram, sendAddress, buffer, receiveChannels, sendChannel, running);
+            while (running.get())
+            {
+                measureRoundTrip(histogram, sendAddress, buffer, receiveChannels, sendChannel, running);
 
-            histogram.reset();
-            System.gc();
-            LockSupport.parkNanos(1000_000_000);
+                histogram.reset();
+                System.gc();
+                LockSupport.parkNanos(1_000_000_000L);
+            }
         }
     }
 
@@ -98,6 +120,7 @@ public class SendReceiveUdpPing
             boolean available = false;
             while (!available)
             {
+                Thread.onSpinWait();
                 if (!running.get())
                 {
                     return;
@@ -114,12 +137,14 @@ public class SendReceiveUdpPing
             }
 
             final long receivedSequenceNumber = buffer.getLong(0);
+            final long receivedTimestamp = buffer.getLong(BitUtil.SIZE_OF_LONG);
+
             if (receivedSequenceNumber != sequenceNumber)
             {
-                throw new IllegalStateException("Data Loss:" + sequenceNumber + " to " + receivedSequenceNumber);
+                throw new IllegalStateException("Data Loss: " + sequenceNumber + " to " + receivedSequenceNumber);
             }
 
-            final long durationNs = System.nanoTime() - buffer.getLong(BitUtil.SIZE_OF_LONG);
+            final long durationNs = System.nanoTime() - receivedTimestamp;
             histogram.recordValue(durationNs);
         }
 

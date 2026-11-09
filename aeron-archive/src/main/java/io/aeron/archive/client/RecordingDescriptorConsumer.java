@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ public interface RecordingDescriptorConsumer
      * @param segmentFileLength of the recording which is a multiple of termBufferLength.
      * @param termBufferLength  of the recorded stream, {@link Image#termBufferLength()}.
      * @param mtuLength         of the recorded stream, {@link Image#mtuLength()}.
-     * @param sessionId         of the recorded stream, this will be most recent session id for extended recordings.
+     * @param sessionId         of the recorded stream, this will be the most recent session id for extended recordings.
      * @param streamId          of the recorded stream, {@link Subscription#streamId()}.
      * @param strippedChannel   of the recorded stream which is used for the recording subscription in the archive.
      * @param originalChannel   of the recorded stream provided to the start recording request, {@link Subscription#channel()}.

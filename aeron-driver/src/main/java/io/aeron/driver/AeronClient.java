@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,19 +22,18 @@ import java.util.concurrent.TimeUnit;
 /**
  * Aeron client library tracker.
  */
-public class AeronClient implements DriverManagedResource
+final class AeronClient implements DriverManagedResource
 {
     private final long clientId;
     private final long clientLivenessTimeoutMs;
-    private final AtomicCounter clientTimeouts;
-    private final AtomicCounter heartbeatTimestamp;
     private boolean reachedEndOfLife = false;
     private boolean closedByCommand = false;
+    private final AtomicCounter clientTimeouts;
+    private final AtomicCounter heartbeatTimestamp;
 
-    public AeronClient(
+    AeronClient(
         final long clientId,
         final long clientLivenessTimeoutNs,
-        final long nowMs,
         final AtomicCounter clientTimeouts,
         final AtomicCounter heartbeatTimestamp)
     {
@@ -42,33 +41,21 @@ public class AeronClient implements DriverManagedResource
         this.clientLivenessTimeoutMs = Math.max(1, TimeUnit.NANOSECONDS.toMillis(clientLivenessTimeoutNs));
         this.clientTimeouts = clientTimeouts;
         this.heartbeatTimestamp = heartbeatTimestamp;
-
-        heartbeatTimestamp.setOrdered(nowMs);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
-        if (!heartbeatTimestamp.isClosed())
-        {
-            heartbeatTimestamp.close();
-        }
+        heartbeatTimestamp.close();
     }
 
-    public long clientId()
-    {
-        return clientId;
-    }
-
-    public void timeOfLastKeepaliveMs(final long nowMs)
-    {
-        heartbeatTimestamp.setOrdered(nowMs);
-    }
-
-    public boolean hasTimedOut()
-    {
-        return reachedEndOfLife;
-    }
-
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         if (timeMs > (heartbeatTimestamp.get() + clientLivenessTimeoutMs))
@@ -77,20 +64,54 @@ public class AeronClient implements DriverManagedResource
 
             if (!closedByCommand)
             {
-                clientTimeouts.incrementOrdered();
+                clientTimeouts.incrementRelease();
                 conductor.clientTimeout(clientId);
             }
+
+            conductor.unavailableCounter(clientId, heartbeatTimestamp.id());
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;
     }
 
+
+    public String toString()
+    {
+        return "AeronClient{" +
+            "clientId=" + clientId +
+            ", clientLivenessTimeoutMs=" + clientLivenessTimeoutMs +
+            ", reachedEndOfLife=" + reachedEndOfLife +
+            ", closedByCommand=" + closedByCommand +
+            ", clientTimeouts=" + clientTimeouts +
+            ", heartbeatTimestamp=" + heartbeatTimestamp +
+            '}';
+    }
+
+    long clientId()
+    {
+        return clientId;
+    }
+
+    boolean hasTimedOut()
+    {
+        return reachedEndOfLife;
+    }
+
+    void timeOfLastKeepaliveMs(final long nowMs)
+    {
+        heartbeatTimestamp.setRelease(nowMs);
+    }
+
     void onClosedByCommand()
     {
         closedByCommand = true;
-        heartbeatTimestamp.set(0);
+        heartbeatTimestamp.setRelease(0);
     }
 }

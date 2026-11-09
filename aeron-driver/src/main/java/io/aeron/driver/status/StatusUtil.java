@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,8 +26,12 @@ import org.agrona.concurrent.status.UnsafeBufferStatusIndicator;
 /**
  * Functions for working with status counters.
  */
-public class StatusUtil
+public final class StatusUtil
 {
+    private StatusUtil()
+    {
+    }
+
     /**
      * Return the controllable idle strategy {@link StatusIndicator}.
      *
@@ -62,7 +66,7 @@ public class StatusUtil
      *
      * @param countersReader that holds the status indicator.
      * @param channel        for the send channel.
-     * @return read-only status indicator that can be used to query the status of the send channel or null
+     * @return read-only status indicator that can be used to query the status of the send channel or null.
      * @see ChannelEndpointStatus for status values and indications.
      */
     public static StatusIndicatorReader sendChannelStatus(final CountersReader countersReader, final String channel)
@@ -94,8 +98,8 @@ public class StatusUtil
      * Return the read-only status indicator for the given receive channel URI.
      *
      * @param countersReader that holds the status indicator.
-     * @param channel        for the receive channel.
-     * @return read-only status indicator that can be used to query the status of the receive channel or null.
+     * @param channel        for the receiving endpoint
+     * @return read-only status indicator that can be used to query the status of the receive channel endpoint or null.
      * @see ChannelEndpointStatus for status values and indications.
      */
     public static StatusIndicatorReader receiveChannelStatus(final CountersReader countersReader, final String channel)

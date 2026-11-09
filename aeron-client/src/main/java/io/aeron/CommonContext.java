@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,31 +15,67 @@
  */
 package io.aeron;
 
-import io.aeron.exceptions.*;
+import io.aeron.config.Config;
+import io.aeron.config.DefaultType;
+import io.aeron.exceptions.AeronException;
+import io.aeron.exceptions.ConcurrentConcludeException;
+import io.aeron.exceptions.DriverTimeoutException;
+import io.aeron.logbuffer.LogBufferDescriptor;
+import io.aeron.logging.BinaryRenderer;
+import org.agrona.BufferUtil;
+import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
 import org.agrona.IoUtil;
+import org.agrona.MarkFile;
+import org.agrona.SemanticVersion;
 import org.agrona.SystemUtil;
 import org.agrona.concurrent.AtomicBuffer;
+import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.errors.DistinctErrorLog;
 import org.agrona.concurrent.errors.ErrorConsumer;
 import org.agrona.concurrent.errors.ErrorLogReader;
+import org.agrona.concurrent.errors.LoggingErrorHandler;
 import org.agrona.concurrent.ringbuffer.ManyToOneRingBuffer;
+import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.io.PrintStream;
+import java.io.UncheckedIOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.MappedByteBuffer;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+import java.nio.channels.FileChannel;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.FileSystemException;
+import java.nio.file.NoSuchFileException;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
-import static io.aeron.Aeron.sleep;
-import static io.aeron.CncFileDescriptor.*;
+import static io.aeron.CncFileDescriptor.CNC_FILE;
+import static io.aeron.CncFileDescriptor.TO_DRIVER_BUFFER_LENGTH_FIELD_OFFSET;
+import static io.aeron.CncFileDescriptor.cncVersionOffset;
+import static io.aeron.CncFileDescriptor.createToDriverBuffer;
 import static java.lang.Long.getLong;
 import static java.lang.System.getProperty;
-import static java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater;
+import static java.nio.channels.FileChannel.MapMode.READ_WRITE;
+import static java.nio.charset.StandardCharsets.US_ASCII;
+import static java.nio.file.StandardOpenOption.READ;
+import static java.nio.file.StandardOpenOption.WRITE;
 
 /**
  * This class provides the Media Driver and client with common configuration for the Aeron directory.
@@ -47,7 +83,7 @@ import static java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater;
  * This class should have {@link #conclude()} called before the methods are used or at least
  * {@link #concludeAeronDirectory()} to avoid NPEs.
  * <p>
- * Properties
+ * Properties:
  * <ul>
  * <li><code>aeron.dir</code>: Use value as directory name for Aeron buffers and status.</li>
  * </ul>
@@ -60,29 +96,67 @@ public class CommonContext implements Cloneable
      */
     public enum InferableBoolean
     {
+        /**
+         * Force the conditional to be false.
+         */
         FORCE_FALSE,
+
+        /**
+         * Force the conditional to be true.
+         */
         FORCE_TRUE,
+
+        /**
+         * Try to infer if true or false is most appropriate.
+         */
         INFER;
 
+        /**
+         * Parse the string looking for {@code true}, {@code false}, or {@code infer}.
+         *
+         * @param value to be parsed.
+         * @return {@link InferableBoolean} which matches the string.
+         */
         public static InferableBoolean parse(final String value)
         {
-            if (null == value || "infer".equalsIgnoreCase(value))
+            if (null == value || "infer".equals(value))
             {
                 return INFER;
             }
 
-            return "true".equalsIgnoreCase(value) ? FORCE_TRUE : FORCE_FALSE;
+            return "true".equals(value) ? FORCE_TRUE : FORCE_FALSE;
         }
     }
 
     /**
+     * Should a component print its configuration on start to {@link System#out}.
+     */
+    @Config(
+        expectedCEnvVarFieldName = "AERON_PRINT_CONFIGURATION_ON_START_ENV_VAR",
+        defaultType = DefaultType.BOOLEAN,
+        defaultBoolean = false)
+    public static final String PRINT_CONFIGURATION_ON_START_PROP_NAME = "aeron.print.configuration";
+
+    /**
      * Property name for driver timeout after which the driver is considered inactive.
      */
+    @Config
     public static final String DRIVER_TIMEOUT_PROP_NAME = "aeron.driver.timeout";
+
+    /**
+     * Property name for the timeout to use in debug mode. By default, this is not set and the configured
+     * timeouts will be used. Setting this value adjusts timeouts to make debugging easier.
+     */
+    @Config(defaultType = DefaultType.LONG, defaultLong = 0, existsInC = false)
+    public static final String DEBUG_TIMEOUT_PROP_NAME = "aeron.debug.timeout";
 
     /**
      * Default timeout in which the driver is expected to respond or heartbeat.
      */
+    @Config(
+        id = "DRIVER_TIMEOUT",
+        timeUnit = TimeUnit.MILLISECONDS,
+        expectedCDefaultFieldName = "AERON_CONTEXT_DRIVER_TIMEOUT_MS_DEFAULT")
     public static final long DEFAULT_DRIVER_TIMEOUT_MS = 10_000;
 
     /**
@@ -98,12 +172,54 @@ public class CommonContext implements Cloneable
     /**
      * The top level Aeron directory used for communication between a Media Driver and client.
      */
+    @Config(skipCDefaultValidation = true)
     public static final String AERON_DIR_PROP_NAME = "aeron.dir";
 
     /**
-     * The value of the top level Aeron directory unless overridden by {@link #aeronDirectoryName(String)}
+     * The value of the top level Aeron directory unless overridden by {@link #aeronDirectoryName(String)}.
      */
+    @Config(id = "AERON_DIR", defaultType = DefaultType.STRING, defaultString = "OS specific")
     public static final String AERON_DIR_PROP_DEFAULT;
+
+    /**
+     * Should new/experimental features be enabled.
+     *
+     * @since 1.44.0
+     */
+    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = false, existsInC = false)
+    public static final String ENABLE_EXPERIMENTAL_FEATURES_PROP_NAME = "aeron.enable.experimental.features";
+
+    /**
+     * Property name for a fallback {@link PrintStream} based logger when it is not possible to use the error logging
+     * callback. Supported values are stdout, stderr, no_op (stderr is the default).
+     */
+    @Config(defaultType = DefaultType.STRING, defaultString = "stderr", existsInC = false)
+    public static final String FALLBACK_LOGGER_PROP_NAME = "aeron.fallback.logger";
+
+    /**
+     * Configuration property for the driver event settings.
+     */
+    public static final String EVENT_LOG = "aeron.event.log";
+
+    /**
+     * Configuration property for the agnet class used for logging.
+     */
+    public static final String EVENT_LOG_READER_CLASSNAME_PROP_NAME = "aeron.event.log.reader.classname";
+
+    /**
+     * Default logging agent.
+     */
+    public static final String EVENT_LOG_READER_CLASSNAME_DEFAULT = "io.aeron.logging.CborLoggerReaderAgent";
+
+    /**
+     * Configuration property for the archive event settings.
+     */
+    public static final String ARCHIVE_EVENT_LOG = "aeron.event.archive.log";
+
+    /**
+     * Configuration property for the cluster event settings.
+     */
+    public static final String CLUSTER_EVENT_LOG = "aeron.event.cluster.log";
 
     /**
      * Media type used for IPC shared memory from {@link Publication} to {@link Subscription} channels.
@@ -116,9 +232,14 @@ public class CommonContext implements Cloneable
     public static final String UDP_MEDIA = "udp";
 
     /**
-     * URI used for IPC {@link Publication}s and {@link Subscription}s
+     * URI base used for IPC channels for {@link Publication}s and {@link Subscription}s.
      */
     public static final String IPC_CHANNEL = "aeron:ipc";
+
+    /**
+     * URI base used for UDP channels for {@link Publication}s and {@link Subscription}s.
+     */
+    public static final String UDP_CHANNEL = "aeron:udp";
 
     /**
      * URI used for Spy {@link Subscription}s whereby an outgoing unicast or multicast publication can be spied on
@@ -189,12 +310,17 @@ public class CommonContext implements Cloneable
     public static final String MDC_CONTROL_MODE_DYNAMIC = "dynamic";
 
     /**
+     * Valid value for {@link #MDC_CONTROL_MODE_PARAM_NAME} when response control is desired.
+     */
+    public static final String CONTROL_MODE_RESPONSE = "response";
+
+    /**
      * Key for the session id for a publication or restricted subscription.
      */
     public static final String SESSION_ID_PARAM_NAME = "session-id";
 
     /**
-     * Key for the linger timeout for a publication to wait around after draining in nanoseconds.
+     * Key for timeout a publication to linger after draining in nanoseconds.
      */
     public static final String LINGER_PARAM_NAME = "linger";
 
@@ -205,7 +331,7 @@ public class CommonContext implements Cloneable
     public static final String RELIABLE_STREAM_PARAM_NAME = "reliable";
 
     /**
-     * Key for the tags for a channel
+     * Key for the tags for a channel.
      */
     public static final String TAGS_PARAM_NAME = "tags";
 
@@ -239,10 +365,11 @@ public class CommonContext implements Cloneable
     public static final String TETHER_PARAM_NAME = "tether";
 
     /**
-     * Parameter name for channel URI param to indicate Subscription represents a group member or individual
+     * Parameter name for channel URI param to indicate if a Subscription represents a group member or individual
      * from the perspective of message reception. This can inform loss handling and similar semantics.
      * <p>
-     * When configuring an subscription for an MDC publication then should be added as this is effective multicast.
+     * When configuring a subscription for an MDC publication then should be added as this is effective multicast.
+     *
      * @see CommonContext#MDC_CONTROL_MODE_PARAM_NAME
      * @see CommonContext#MDC_CONTROL_PARAM_NAME
      */
@@ -261,27 +388,324 @@ public class CommonContext implements Cloneable
     public static final String CONGESTION_CONTROL_PARAM_NAME = "cc";
 
     /**
-     * Using an integer because there is no support for boolean. 1 is concluded, 0 is not concluded.
+     * Parameter name for Publication URI param to indicate the flow control strategy to be used.
+     * Options include {@code min}, {@code max}, and {@code pref}.
      */
-    private static final AtomicIntegerFieldUpdater<CommonContext> IS_CONCLUDED_UPDATER = newUpdater(
-        CommonContext.class, "isConcluded");
-    private volatile int isConcluded;
+    public static final String FLOW_CONTROL_PARAM_NAME = "fc";
 
+    /**
+     * Parameter name for Subscription URI param to indicate the receiver tag to be sent in SMs.
+     */
+    public static final String GROUP_TAG_PARAM_NAME = "gtag";
+
+    /**
+     * Parameter name for Publication URI param to indicate whether spy subscriptions should simulate a connection.
+     */
+    public static final String SPIES_SIMULATE_CONNECTION_PARAM_NAME = "ssc";
+
+    /**
+     * Parameter name for the underlying OS socket send buffer length.
+     */
+    public static final String SOCKET_SNDBUF_PARAM_NAME = "so-sndbuf";
+
+    /**
+     * Parameter name for the underlying OS socket receive buffer length.
+     */
+    public static final String SOCKET_RCVBUF_PARAM_NAME = "so-rcvbuf";
+
+    /**
+     * Parameter name for the underlying OS socket IP type of service.
+     */
+    public static final String SOCKET_TOS_PARAM_NAME = "so-tos";
+
+    /**
+     * Parameter name for the congestion control's initial receiver window length.
+     */
+    public static final String RECEIVER_WINDOW_LENGTH_PARAM_NAME = "rcv-wnd";
+
+    /**
+     * Parameter name of the offset for the media receive timestamp to be inserted into the incoming message on a
+     * subscription. The special value of 'reserved' can be used to insert into the reserved value field. Media
+     * receive timestamp is taken as the earliest possible point after the packet is received from the network. This
+     * is only supported in the C media driver, the Java Media Driver will generate an error if used.
+     */
+    public static final String MEDIA_RCV_TIMESTAMP_OFFSET_PARAM_NAME = "media-rcv-ts-offset";
+
+    /**
+     * Parameter name of the offset for the channel receive timestamp to be inserted into the incoming message on a
+     * subscription. The special value of 'reserved' can be used to insert into the reserved value field. Channel
+     * receive timestamp is taken as soon a possible after the packet is received by Aeron receiver from the transport
+     * bindings.
+     */
+    public static final String CHANNEL_RECEIVE_TIMESTAMP_OFFSET_PARAM_NAME = "channel-rcv-ts-offset";
+
+    /**
+     * Parameter name of the offset for the channel send timestamp to be inserted into the outgoing message
+     * on a publication. The special value of 'reserved' can be used to insert into the reserved value
+     * field. Channel send timestamp is taken shortly before passing the message over to the configured transport
+     * bindings.
+     */
+    public static final String CHANNEL_SEND_TIMESTAMP_OFFSET_PARAM_NAME = "channel-snd-ts-offset";
+
+    /**
+     * Placeholder value to use in URIs to specify that a timestamp should be stored in the reserved value field.
+     */
+    public static final String RESERVED_OFFSET = "reserved";
+
+    /**
+     * Parameter name for the field that will be used to specify the response endpoint on a subscription and publication
+     * used in a response "server".
+     *
+     * @since 1.44.0
+     */
+    public static final String RESPONSE_ENDPOINT_PARAM_NAME = "response-endpoint";
+
+    /**
+     * Parameter name for the field that will be used to specify the correlation id used on a publication to connect it
+     * to a subscription's image in order to set up a response stream.
+     *
+     * @since 1.44.0
+     */
+    public static final String RESPONSE_CORRELATION_ID_PARAM_NAME = "response-correlation-id";
+
+    /**
+     * Placeholder value to use in response channels where the publication is to be pre-created to reserve and hold
+     * onto the local port.
+     */
+    public static final String PROTOTYPE_CORRELATION_ID = "prototype";
+
+    /**
+     * Parameter name to set explicit NAK delay (e.g. {@code nak-delay=200ms}).
+     *
+     * @since 1.44.0
+     */
+    public static final String NAK_DELAY_PARAM_NAME = "nak-delay";
+
+    /**
+     * Parameter name to set explicit untethered window limit timeout, e.g. {@code untethered-window-limit-timeout=10s}.
+     *
+     * @since 1.45.0
+     */
+    public static final String UNTETHERED_WINDOW_LIMIT_TIMEOUT_PARAM_NAME = "untethered-window-limit-timeout";
+
+    /**
+     * Parameter name to set explicit untethered linger timeout, e.g. {@code untethered-linger-timeout=10s}.
+     *
+     * @since 1.48.0
+     */
+    public static final String UNTETHERED_LINGER_TIMEOUT_PARAM_NAME = "untethered-linger-timeout";
+
+    /**
+     * Parameter name to set explicit untethered resting timeout, e.g. {@code untethered-resting-timeout=10s}.
+     *
+     * @since 1.45.0
+     */
+    public static final String UNTETHERED_RESTING_TIMEOUT_PARAM_NAME = "untethered-resting-timeout";
+
+    /**
+     * Parameter name to set the max number of outstanding active retransmits for a publication.
+     *
+     * @since 1.45.0
+     */
+    public static final String MAX_RESEND_PARAM_NAME = "max-resend";
+
+    /**
+     * Parameter name to set the stream id for the channel.
+     *
+     * @since 1.47.0
+     */
+    public static final String STREAM_ID_PARAM_NAME = "stream-id";
+
+    /**
+     * Parameter name for the publication window length, i.e. how far ahead can publication accept offers.
+     *
+     * @since 1.47.0
+     */
+    public static final String PUBLICATION_WINDOW_LENGTH_PARAM_NAME = "pub-wnd";
+
+    /**
+     * Property name to use to set the secure random algorithm to be used by the Aeron component.
+     */
+    public static final String SECURE_RANDOM_ALGORITHM_PROP_NAME = "aeron.secure.random.algorithm";
+
+    /**
+     * The default secure random algorithm to be used.
+     */
+    public static final String SECURE_RANDOM_ALGORITHM_DEFAULT =
+        SystemUtil.isWindows() ? "Windows-PRNG" : "NativePRNGNonBlocking";
+
+    /**
+     * Property name to use to set the thread naming mode. Defaults to {@link #THREAD_NAMING_DEFAULT}.
+     */
+    @Config(defaultType = DefaultType.STRING, defaultString = "classic", existsInC = false)
+    public static final String THREAD_NAMING_PROP_NAME = "aeron.thread.naming";
+
+    /**
+     * Value of {@link #THREAD_NAMING_PROP_NAME} that preserves legacy thread names.
+     */
+    public static final String THREAD_NAMING_CLASSIC = "classic";
+    /**
+     * Value of {@link #THREAD_NAMING_PROP_NAME} that uses new prefixed names.
+     */
+    public static final String THREAD_NAMING_NEW = "new";
+    /**
+     * Default value of {@link #THREAD_NAMING_PROP_NAME}.
+     */
+    public static final String THREAD_NAMING_DEFAULT = THREAD_NAMING_CLASSIC;
+
+    /**
+     * Property name to treat the requested CPU affinities of all threads as offsets
+     * into the effective cgroup cpuset, rather than as raw CPU ids, and to validate that cpuset.
+     */
+    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = false)
+    public static final String THREAD_AFFINITY_USE_CPUSET_OFFSETS_PROP_NAME =
+        "aeron.thread.affinity.use.cpuset.offsets";
+
+    /**
+     * Property name to fail with a {@link io.aeron.exceptions.ConfigurationException} instead of warning when the
+     * CPU affinity and topology validation of all threads finds a problem.
+     */
+    @Config(defaultType = DefaultType.BOOLEAN, defaultBoolean = false)
+    public static final String THREAD_AFFINITY_FAIL_ON_VALIDATION_ERRORS_PROP_NAME =
+        "aeron.thread.affinity.fail.on.validation.errors";
+
+    static final DateTimeFormatter DATE_TIME_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSSZ");
+
+    static final DateTimeFormatter FILE_NAME_FORMATTER = DateTimeFormatter.ofPattern("uuuu-MM-dd-HH-mm-ss-SSSSSSZ");
+    /**
+     * Choose a thread/role name depending on the configured naming scheme.
+     *
+     * @param newName the new, prefixed name.
+     * @param classicName  the old name.
+     * @return the name to use for the current naming scheme.
+     */
+    public static String threadName(final String newName, final String classicName)
+    {
+        final String mode = System.getProperty(THREAD_NAMING_PROP_NAME, THREAD_NAMING_DEFAULT);
+        return switch (mode)
+        {
+            case THREAD_NAMING_CLASSIC -> classicName;
+            case THREAD_NAMING_NEW -> newName;
+            default -> throw new IllegalArgumentException("Unknown thread naming mode: " + mode);
+        };
+    }
+
+    /**
+     * Should the requested CPU affinities of all threads be treated as offsets into the effective cgroup cpuset.
+     *
+     * @return true if the CPU affinities are offsets into the effective cgroup cpuset.
+     * @see #THREAD_AFFINITY_USE_CPUSET_OFFSETS_PROP_NAME
+     */
+    public static boolean threadAffinityUseCpusetOffsets()
+    {
+        return Boolean.getBoolean(THREAD_AFFINITY_USE_CPUSET_OFFSETS_PROP_NAME);
+    }
+
+    /**
+     * Indicates if CPU affinity and topology warnings be treated as errors.
+     *
+     * @return true if warnings should be treated as errors.
+     * @see #THREAD_AFFINITY_FAIL_ON_VALIDATION_ERRORS_PROP_NAME
+     */
+    public static boolean threadAffinityFailOnValidationErrors()
+    {
+        return Boolean.getBoolean(THREAD_AFFINITY_FAIL_ON_VALIDATION_ERRORS_PROP_NAME);
+    }
+
+    /**
+     * Event Buffer length system property name. If not set then output will default to {@link System#out}.
+     */
+    public static final String EVENT_LOG_FILENAME_PROP_NAME = "aeron.event.log.filename";
+    /**
+     * Event Buffer log file max length system property. If not set then {@link Long#MAX_VALUE} will be used.
+     */
+    public static final String EVENT_LOG_FILE_MAX_LENGTH = "aeron.event.log.file.max.length";
+
+    /**
+     * System property to toggle whether {@link BinaryRenderer} implementations render the remaining bytes
+     * of fields that are not part of the header information.
+     */
+    public static final String EVENT_LOG_RENDER_DATA_PROP_NAME = "aeron.event.log.render.data";
+
+    /**
+     * Should a component's configuration be printed on start.
+     *
+     * @return {@code true} if the configuration should be printed on start.
+     * @see #PRINT_CONFIGURATION_ON_START_PROP_NAME
+     */
+    public static boolean shouldPrintConfigurationOnStart()
+    {
+        return "true".equals(getProperty(PRINT_CONFIGURATION_ON_START_PROP_NAME));
+    }
+
+    /**
+     * Get the configured value for the secure random algorithm, falling back to the default if not supplied.
+     *
+     * @return the secure random algorithm
+     * @see #SECURE_RANDOM_ALGORITHM_PROP_NAME
+     * @see #SECURE_RANDOM_ALGORITHM_DEFAULT
+     */
+    public static String getSecureRandomAlgorithm()
+    {
+        return System.getProperty(SECURE_RANDOM_ALGORITHM_PROP_NAME, SECURE_RANDOM_ALGORITHM_DEFAULT);
+    }
+
+    /**
+     * Get the current fallback logger based on the supplied property.
+     *
+     * @return the configured PrintStream.
+     */
+    @Config
+    public static PrintStream fallbackLogger()
+    {
+        final String fallbackLoggerName = getProperty(FALLBACK_LOGGER_PROP_NAME, "stderr");
+        return switch (fallbackLoggerName)
+        {
+            case "stdout" -> System.out;
+            case "no_op" -> NO_OP_LOGGER;
+            default -> System.err;
+        };
+    }
+
+    private static final PrintStream NO_OP_LOGGER = new PrintStream(
+        new OutputStream()
+        {
+            public void write(final int b)
+            {
+                // No-op
+            }
+        });
+    private static final Map<String, Boolean> DEBUG_FIELDS_SEEN = new ConcurrentHashMap<>();
+    private static final VarHandle IS_CONCLUDED_VH;
+
+    static
+    {
+        try
+        {
+            IS_CONCLUDED_VH = MethodHandles.lookup().findVarHandle(CommonContext.class, "isConcluded", boolean.class);
+        }
+        catch (final ReflectiveOperationException ex)
+        {
+            throw new ExceptionInInitializerError(ex);
+        }
+    }
+
+    private volatile boolean isConcluded;
     private long driverTimeoutMs = DRIVER_TIMEOUT_MS;
     private String aeronDirectoryName = getAeronDirectoryName();
     private File aeronDirectory;
     private File cncFile;
     private UnsafeBuffer countersMetaDataBuffer;
     private UnsafeBuffer countersValuesBuffer;
+    private boolean enableExperimentalFeatures = Boolean.getBoolean(ENABLE_EXPERIMENTAL_FEATURES_PROP_NAME);
 
     static
     {
         String baseDirName = null;
 
-        if (SystemUtil.osName().contains("linux"))
+        if (SystemUtil.isLinux())
         {
             final File devShmDir = new File("/dev/shm");
-
             if (devShmDir.exists())
             {
                 baseDirName = "/dev/shm/aeron";
@@ -294,6 +718,13 @@ public class CommonContext implements Cloneable
         }
 
         AERON_DIR_PROP_DEFAULT = baseDirName + '-' + System.getProperty("user.name", "default");
+    }
+
+    /**
+     * Construct a CommonContext using default values and loading from system properties.
+     */
+    public CommonContext()
+    {
     }
 
     /**
@@ -319,6 +750,7 @@ public class CommonContext implements Cloneable
      *
      * @return the default directory name to be used if {@link #aeronDirectoryName(String)} is not set.
      */
+    @Config(id = "AERON_DIR")
     public static String getAeronDirectoryName()
     {
         return getProperty(AERON_DIR_PROP_NAME, AERON_DIR_PROP_DEFAULT);
@@ -331,7 +763,7 @@ public class CommonContext implements Cloneable
      */
     public static String generateRandomDirName()
     {
-        return AERON_DIR_PROP_DEFAULT + '-' + UUID.randomUUID().toString();
+        return AERON_DIR_PROP_DEFAULT + "-" + UUID.randomUUID();
     }
 
     /**
@@ -341,7 +773,7 @@ public class CommonContext implements Cloneable
      */
     public CommonContext conclude()
     {
-        if (0 != IS_CONCLUDED_UPDATER.getAndSet(this, 1))
+        if ((boolean)IS_CONCLUDED_VH.getAndSet(this, true))
         {
             throw new ConcurrentConcludeException();
         }
@@ -354,6 +786,16 @@ public class CommonContext implements Cloneable
     }
 
     /**
+     * Has the context had the {@link #conclude()} method called.
+     *
+     * @return true of the {@link #conclude()} method has been called.
+     */
+    public boolean isConcluded()
+    {
+        return isConcluded;
+    }
+
+    /**
      * Conclude the {@link #aeronDirectory()} so it does not need to keep being recreated.
      *
      * @return this for a fluent API.
@@ -362,7 +804,14 @@ public class CommonContext implements Cloneable
     {
         if (null == aeronDirectory)
         {
-            aeronDirectory = new File(aeronDirectoryName);
+            try
+            {
+                aeronDirectory = new File(aeronDirectoryName).getCanonicalFile();
+            }
+            catch (final IOException e)
+            {
+                throw new UncheckedIOException(e);
+            }
         }
 
         return this;
@@ -382,7 +831,7 @@ public class CommonContext implements Cloneable
     /**
      * Get the directory in which the aeron config files are stored.
      * <p>
-     * This is valid after a call to {@link #conclude()}.
+     * This is valid after a call to {@link #conclude()} or {@link #concludeAeronDirectory()}.
      *
      * @return the directory in which the aeron config files are stored.
      * @see #aeronDirectoryName()
@@ -416,10 +865,21 @@ public class CommonContext implements Cloneable
     }
 
     /**
-     * Get the buffer containing the counter meta data. These counters are R/W for the driver, read only for all
+     * Create a new command and control file in the administration directory.
+     *
+     * @param aeronDirectoryName name of the aeronDirectory that containing the cnc file.
+     * @return The newly created File.
+     */
+    public static File newCncFile(final String aeronDirectoryName)
+    {
+        return new File(aeronDirectoryName, CncFileDescriptor.CNC_FILE);
+    }
+
+    /**
+     * Get the buffer containing the counter metadata. These counters are R/W for the driver, read only for all
      * other users.
      *
-     * @return The buffer storing the counter meta data.
+     * @return The buffer storing the counter metadata.
      */
     public UnsafeBuffer countersMetaDataBuffer()
     {
@@ -427,9 +887,9 @@ public class CommonContext implements Cloneable
     }
 
     /**
-     * Set the buffer containing the counter meta data. Testing/internal purposes only.
+     * Set the buffer containing the counter metadata. Testing/internal purposes only.
      *
-     * @param countersMetaDataBuffer The new counter meta data buffer.
+     * @param countersMetaDataBuffer The new counter metadata buffer.
      * @return this for a fluent API.
      */
     public CommonContext countersMetaDataBuffer(final UnsafeBuffer countersMetaDataBuffer)
@@ -471,7 +931,7 @@ public class CommonContext implements Cloneable
     }
 
     /**
-     * Set the driver timeout in milliseconds
+     * Set the driver timeout in milliseconds.
      *
      * @param driverTimeoutMs to indicate liveness of driver
      * @return this for a fluent API.
@@ -487,9 +947,105 @@ public class CommonContext implements Cloneable
      *
      * @return driver timeout in milliseconds.
      */
+    @Config(id = "DRIVER_TIMEOUT")
     public long driverTimeoutMs()
     {
-        return driverTimeoutMs;
+        return checkDebugTimeout(driverTimeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Should experimental features for the driver be enabled.
+     *
+     * @return <code>true</code> if enabled, <code>false</code> otherwise.
+     * @see #enableExperimentalFeatures(boolean)
+     * @since 1.44.0
+     */
+    @Config
+    public boolean enableExperimentalFeatures()
+    {
+        return enableExperimentalFeatures;
+    }
+
+    /**
+     * Should experimental features for the driver be enabled.
+     *
+     * @param enableExperimentalFeatures indicate whether experimental features for the driver should be enabled.
+     * @return this for a fluent API
+     * @see #ENABLE_EXPERIMENTAL_FEATURES_PROP_NAME
+     * @see #enableExperimentalFeatures()
+     * @since 1.44.0
+     */
+    public CommonContext enableExperimentalFeatures(final boolean enableExperimentalFeatures)
+    {
+        this.enableExperimentalFeatures = enableExperimentalFeatures;
+        return this;
+    }
+
+    /**
+     * Override the supplied timeout with the debug value if it has been set, and we are in debug mode.
+     *
+     * @param timeout  The timeout value currently in use.
+     * @param timeUnit The units of the timeout value. Debug timeout is specified in ns, so will be converted to this
+     *                 unit.
+     * @return The debug timeout if specified, and we are being debugged or the supplied value if not. Will be in
+     * timeUnit units.
+     */
+    public static long checkDebugTimeout(final long timeout, final TimeUnit timeUnit)
+    {
+        return checkDebugTimeout(timeout, timeUnit, 1.0);
+    }
+
+    /**
+     * Override the supplied timeout with the debug value if it has been set, and we are in debug mode.
+     *
+     * @param timeout  The timeout value currently in use.
+     * @param timeUnit The units of the timeout value. Debug timeout is specified in ns, so will be converted to this
+     *                 unit.
+     * @param factor   to multiply the debug timeout by. Required when some timeouts need to be larger than others in
+     *                 order to pass validation. E.g. clientLiveness and publicationUnblock.
+     * @return The debug timeout if specified, and we are being debugged or the supplied value if not. Will be in
+     * timeUnit units.
+     */
+    public static long checkDebugTimeout(final long timeout, final TimeUnit timeUnit, final double factor)
+    {
+        final String debugTimeoutString = getProperty(DEBUG_TIMEOUT_PROP_NAME);
+        if (null == debugTimeoutString || !SystemUtil.isDebuggerAttached())
+        {
+            return timeout;
+        }
+
+        try
+        {
+            final long debugTimeoutNs =
+                (long)(factor * SystemUtil.parseDuration(DEBUG_TIMEOUT_PROP_NAME, debugTimeoutString));
+            final long debugTimeout = timeUnit.convert(debugTimeoutNs, TimeUnit.NANOSECONDS);
+            final StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
+
+            String debugFieldName = "<unknown>";
+            for (int i = 0; i < stackTrace.length; i++)
+            {
+                final String methodName = stackTrace[i].getMethodName();
+                if (!"checkDebugTimeout".equals(methodName) && !"getStackTrace".equals(methodName))
+                {
+                    final String className = stackTrace[i].getClassName();
+                    debugFieldName = className + "." + methodName;
+                    break;
+                }
+            }
+
+            if (null == DEBUG_FIELDS_SEEN.putIfAbsent(debugFieldName, true))
+            {
+                final String message = "Using debug timeout [" + debugTimeout + "] for " + debugFieldName +
+                    " replacing [" + timeout + "]";
+                System.out.println(message);
+            }
+
+            return debugTimeout;
+        }
+        catch (final NumberFormatException ignore)
+        {
+            return timeout;
+        }
     }
 
     /**
@@ -510,7 +1066,7 @@ public class CommonContext implements Cloneable
     {
         final File cncFile = new File(aeronDirectory, CncFileDescriptor.CNC_FILE);
 
-        if (cncFile.exists() && cncFile.length() > 0)
+        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.META_DATA_LENGTH)
         {
             if (null != logger)
             {
@@ -526,7 +1082,7 @@ public class CommonContext implements Cloneable
     /**
      * Is a media driver active in the given directory?
      *
-     * @param directory       to check
+     * @param directory       to check.
      * @param driverTimeoutMs for the driver liveness check.
      * @param logger          for feedback as liveness checked.
      * @return true if a driver is active or false if not.
@@ -536,7 +1092,7 @@ public class CommonContext implements Cloneable
     {
         final File cncFile = new File(directory, CncFileDescriptor.CNC_FILE);
 
-        if (cncFile.exists() && cncFile.length() > 0)
+        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.META_DATA_LENGTH)
         {
             logger.accept("INFO: Aeron CnC file exists: " + cncFile);
 
@@ -547,7 +1103,7 @@ public class CommonContext implements Cloneable
             }
             finally
             {
-                IoUtil.unmap(cncByteBuffer);
+                BufferUtil.free(cncByteBuffer);
             }
         }
 
@@ -570,12 +1126,12 @@ public class CommonContext implements Cloneable
         }
         finally
         {
-            IoUtil.unmap(cncByteBuffer);
+            BufferUtil.free(cncByteBuffer);
         }
     }
 
     /**
-     * Is a media driver active in the current mapped CnC buffer? If the driver is mid start then it will wait for
+     * Is a media driver active in the current mapped CnC buffer? If the driver is starting then it will wait for
      * up to the driverTimeoutMs by checking for the cncVersion being set.
      *
      * @param driverTimeoutMs for the driver liveness check.
@@ -599,7 +1155,7 @@ public class CommonContext implements Cloneable
         {
             if (System.currentTimeMillis() > (startTimeMs + driverTimeoutMs))
             {
-                throw new DriverTimeoutException("CnC file is created but not initialised.");
+                throw new DriverTimeoutException("CnC file is created but not initialised");
             }
 
             sleep(1);
@@ -614,7 +1170,7 @@ public class CommonContext implements Cloneable
         final long nowMs = System.currentTimeMillis();
         final long timestampAgeMs = nowMs - timestampMs;
 
-        logger.accept("INFO: Aeron toDriver consumer heartbeat is (ms): " + timestampAgeMs);
+        logger.accept("INFO: Aeron toDriver consumer heartbeat age is (ms): " + timestampAgeMs);
 
         return timestampAgeMs <= driverTimeoutMs;
     }
@@ -622,7 +1178,7 @@ public class CommonContext implements Cloneable
     /**
      * Request a driver to run its termination hook.
      *
-     * @param directory for the driver.
+     * @param directory   for the driver.
      * @param tokenBuffer containing the optional token for the request.
      * @param tokenOffset within the tokenBuffer at which the token begins.
      * @param tokenLength of the token in the tokenBuffer.
@@ -636,7 +1192,7 @@ public class CommonContext implements Cloneable
     {
         final File cncFile = new File(directory, CncFileDescriptor.CNC_FILE);
 
-        if (cncFile.exists() && cncFile.length() > 0)
+        if (cncFile.exists() && cncFile.length() > CncFileDescriptor.META_DATA_LENGTH)
         {
             final MappedByteBuffer cncByteBuffer = IoUtil.mapExistingFile(cncFile, "CnC file");
             try
@@ -644,19 +1200,21 @@ public class CommonContext implements Cloneable
                 final UnsafeBuffer cncMetaDataBuffer = CncFileDescriptor.createMetaDataBuffer(cncByteBuffer);
                 final int cncVersion = cncMetaDataBuffer.getIntVolatile(cncVersionOffset(0));
 
-                CncFileDescriptor.checkVersion(cncVersion);
+                if (cncVersion > 0)
+                {
+                    CncFileDescriptor.checkVersion(cncVersion);
 
-                final ManyToOneRingBuffer toDriverBuffer = new ManyToOneRingBuffer(
-                    CncFileDescriptor.createToDriverBuffer(cncByteBuffer, cncMetaDataBuffer));
-                final long clientId = toDriverBuffer.nextCorrelationId();
+                    final ManyToOneRingBuffer toDriverBuffer = new ManyToOneRingBuffer(
+                        CncFileDescriptor.createToDriverBuffer(cncByteBuffer, cncMetaDataBuffer));
+                    final long clientId = toDriverBuffer.nextCorrelationId();
+                    final DriverProxy driverProxy = new DriverProxy(toDriverBuffer, clientId);
 
-                final DriverProxy driverProxy = new DriverProxy(toDriverBuffer, clientId);
-
-                return driverProxy.terminateDriver(tokenBuffer, tokenOffset, tokenLength);
+                    return driverProxy.terminateDriver(tokenBuffer, tokenOffset, tokenLength);
+                }
             }
             finally
             {
-                IoUtil.unmap(cncByteBuffer);
+                BufferUtil.free(cncByteBuffer);
             }
         }
 
@@ -664,7 +1222,7 @@ public class CommonContext implements Cloneable
     }
 
     /**
-     * Read the error log to a given {@link PrintStream}
+     * Read the error log to a given {@link PrintStream}.
      *
      * @param out to write the error log contents to.
      * @return the number of observations from the error log.
@@ -678,12 +1236,12 @@ public class CommonContext implements Cloneable
         }
         finally
         {
-            IoUtil.unmap(cncByteBuffer);
+            BufferUtil.free(cncByteBuffer);
         }
     }
 
     /**
-     * Read the error log to a given {@link PrintStream}
+     * Read the error log to a given {@link PrintStream}.
      *
      * @param out           to write the error log contents to.
      * @param cncByteBuffer containing the error log.
@@ -696,12 +1254,7 @@ public class CommonContext implements Cloneable
             return 0;
         }
 
-        final UnsafeBuffer cncMetaDataBuffer = CncFileDescriptor.createMetaDataBuffer(cncByteBuffer);
-        final int cncVersion = cncMetaDataBuffer.getInt(CncFileDescriptor.cncVersionOffset(0));
-
-        CncFileDescriptor.checkVersion(cncVersion);
-
-        return printErrorLog(CncFileDescriptor.createErrorLogBuffer(cncByteBuffer, cncMetaDataBuffer), out);
+        return printErrorLog(errorLogBuffer(cncByteBuffer), out);
     }
 
     /**
@@ -712,7 +1265,7 @@ public class CommonContext implements Cloneable
     }
 
     /**
-     * Print the contents of an error log to a {@link PrintStream} in human readable format.
+     * Print the contents of an error log to a {@link PrintStream} in human-readable format.
      *
      * @param errorBuffer to read errors from.
      * @param out         print the errors to.
@@ -722,21 +1275,310 @@ public class CommonContext implements Cloneable
     {
         int distinctErrorCount = 0;
 
-        if (errorBuffer.capacity() > 0 && ErrorLogReader.hasErrors(errorBuffer))
+        if (ErrorLogReader.hasErrors(errorBuffer))
         {
-            final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSZ");
-            final ErrorConsumer errorConsumer = (count, firstTimestamp, lastTimestamp, ex) ->
-                out.format(
-                "***%n%d observations from %s to %s for:%n %s%n",
-                count,
-                dateFormat.format(new Date(firstTimestamp)),
-                dateFormat.format(new Date(lastTimestamp)),
-                ex);
+            final ErrorConsumer errorConsumer =
+                (count, firstTimestamp, lastTimestamp, encodedException) ->
+                {
+                    final ZoneId zoneId = ZoneId.systemDefault();
+                    final String fromDate = DATE_TIME_FORMATTER.format(
+                        OffsetDateTime.ofInstant(Instant.ofEpochMilli(firstTimestamp), zoneId));
+                    final String toDate = DATE_TIME_FORMATTER.format(
+                        OffsetDateTime.ofInstant(Instant.ofEpochMilli(lastTimestamp), zoneId));
+
+                    out.println();
+                    out.println(count + " observations from " + fromDate + " to " + toDate + " for:");
+                    out.println(encodedException);
+                };
 
             distinctErrorCount = ErrorLogReader.read(errorBuffer, errorConsumer);
-            out.format("%n%d distinct errors observed.%n", distinctErrorCount);
+            out.println();
+            out.println(distinctErrorCount + " distinct errors observed.");
+        }
+        else
+        {
+            out.println();
+            out.println("0 distinct errors observed");
         }
 
         return distinctErrorCount;
+    }
+
+    /**
+     * Save the existing errors from a {@link MarkFile}/CnC file to a separate text file in the same directory as the
+     * original file.
+     *
+     * @param markFile        which contains the error buffer.
+     * @param errorBuffer     which wraps the error log.
+     * @param logger          to which the existing errors will be printed if save to a file fails with an error.
+     * @param errorFilePrefix to add to the generated error file.
+     */
+    public static void saveExistingErrors(
+        final File markFile,
+        final AtomicBuffer errorBuffer,
+        final PrintStream logger,
+        final String errorFilePrefix)
+    {
+        Objects.requireNonNull(markFile, "markFile");
+        Objects.requireNonNull(errorBuffer, "errorBuffer");
+        Objects.requireNonNull(logger, "logger");
+        Objects.requireNonNull(errorFilePrefix, "errorFilePrefix");
+
+        final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        final int observations = printErrorLog(errorBuffer, new PrintStream(baos, false, US_ASCII));
+        if (observations > 0)
+        {
+            final File errorLogFile = new File(
+                markFile.getParentFile(), errorFilePrefix + '-' +
+                FILE_NAME_FORMATTER.format(OffsetDateTime.ofInstant(Instant.now(), ZoneId.systemDefault())) +
+                "-error.log");
+
+            try (FileOutputStream out = new FileOutputStream(errorLogFile))
+            {
+                baos.writeTo(out);
+                logger.println("WARNING: existing errors saved to: " + errorLogFile);
+            }
+            catch (final IOException ex)
+            {
+                logger.println("ERROR: Failed to save existing errors to: " + errorLogFile);
+                ex.printStackTrace(logger);
+
+                logger.println();
+                logger.println("Dumping errors here:");
+                logger.println();
+                try
+                {
+                    baos.writeTo(logger);
+                }
+                catch (final IOException ex2)
+                {
+                    ex2.printStackTrace(logger);
+                }
+            }
+        }
+    }
+
+    /**
+     * Get an {@link AtomicBuffer} which wraps the error log in the CnC file.
+     *
+     * @param cncByteBuffer which contains the error log.
+     * @return an {@link AtomicBuffer} which wraps the error log in the CnC file.
+     */
+    public static AtomicBuffer errorLogBuffer(final ByteBuffer cncByteBuffer)
+    {
+        final DirectBuffer cncMetaDataBuffer = CncFileDescriptor.createMetaDataBuffer(cncByteBuffer);
+        final int cncVersion = cncMetaDataBuffer.getInt(cncVersionOffset(0));
+
+        CncFileDescriptor.checkVersion(cncVersion);
+
+        return CncFileDescriptor.createErrorLogBuffer(cncByteBuffer, cncMetaDataBuffer);
+    }
+
+    /**
+     * Wrap a user ErrorHandler so that error will continue to write to the errorLog.
+     *
+     * @param userErrorHandler the user specified ErrorHandler, can be null.
+     * @param errorLog         the configured errorLog, either the default or user supplied.
+     * @return an error handler that will delegate to both the userErrorHandler and the errorLog.
+     */
+    public static ErrorHandler setupErrorHandler(final ErrorHandler userErrorHandler, final DistinctErrorLog errorLog)
+    {
+        return setupErrorHandler(userErrorHandler, errorLog, fallbackLogger());
+    }
+
+    /**
+     * Connect to the media driver and extract file page size from the C'n'C file.
+     *
+     * @param aeronDirectory where driver is running.
+     * @param clock          to use.
+     * @param timeoutMs      for awaiting connection.
+     * @return file page size from running media driver or {@link LogBufferDescriptor#PAGE_MIN_SIZE} if driver is old.
+     * @since 1.48.0
+     */
+    public static int driverFilePageSize(final File aeronDirectory, final EpochClock clock, final long timeoutMs)
+    {
+        final UnsafeBuffer metadata =
+            awaitCncFileCreation(new File(aeronDirectory, CNC_FILE), clock, clock.time() + timeoutMs);
+        try
+        {
+            return driverFilePageSize(metadata);
+        }
+        finally
+        {
+            BufferUtil.free(metadata);
+        }
+    }
+
+    /**
+     * Connect to the media driver and get the {@code nextCorrelationId}.
+     *
+     * @param aeronDirectory where driver is running.
+     * @param clock          to use.
+     * @param timeoutMs      for awaiting connection.
+     * @return next correlation id.
+     * @since 1.48.0
+     */
+    public static long nextCorrelationId(final File aeronDirectory, final EpochClock clock, final long timeoutMs)
+    {
+        final UnsafeBuffer metadata =
+            awaitCncFileCreation(new File(aeronDirectory, CNC_FILE), clock, clock.time() + timeoutMs);
+        try
+        {
+            final int correlationIdOffset =
+                metadata.getInt(TO_DRIVER_BUFFER_LENGTH_FIELD_OFFSET) - RingBufferDescriptor.TRAILER_LENGTH +
+                RingBufferDescriptor.CORRELATION_COUNTER_OFFSET;
+            final UnsafeBuffer toDriverBuffer = createToDriverBuffer(metadata.byteBuffer(), metadata);
+            return toDriverBuffer.getAndAddLong(correlationIdOffset, 1);
+        }
+        finally
+        {
+            BufferUtil.free(metadata);
+        }
+    }
+
+    static int driverFilePageSize(final DirectBuffer metadata)
+    {
+        final int pageSize = CncFileDescriptor.filePageSize(metadata);
+        return 0 != pageSize ? pageSize : LogBufferDescriptor.PAGE_MIN_SIZE;
+    }
+
+    @SuppressWarnings("try")
+    static UnsafeBuffer awaitCncFileCreation(
+        final File cncFile, final EpochClock clock, final long deadlineMs)
+    {
+        while (true)
+        {
+            while (!cncFile.exists() || cncFile.length() < CncFileDescriptor.META_DATA_LENGTH)
+            {
+                if (clock.time() > deadlineMs)
+                {
+                    throw new DriverTimeoutException("CnC file not created: " + cncFile.getAbsolutePath());
+                }
+
+                sleep(Aeron.Configuration.IDLE_SLEEP_DEFAULT_MS);
+            }
+
+            try (FileChannel fileChannel = FileChannel.open(cncFile.toPath(), READ, WRITE))
+            {
+                final long fileSize = fileChannel.size();
+                if (fileSize < CncFileDescriptor.META_DATA_LENGTH)
+                {
+                    if (clock.time() > deadlineMs)
+                    {
+                        throw new DriverTimeoutException(
+                            "CnC file is created but not populated: " + cncFile.getAbsolutePath());
+                    }
+
+                    fileChannel.close();
+                    sleep(Aeron.Configuration.IDLE_SLEEP_DEFAULT_MS);
+                    continue;
+                }
+
+                final UnsafeBuffer metaDataBuffer =
+                    CncFileDescriptor.createMetaDataBuffer(fileChannel.map(READ_WRITE, 0, fileSize));
+
+                int cncVersion;
+                while (0 == (cncVersion = metaDataBuffer.getIntVolatile(CncFileDescriptor.cncVersionOffset(0))))
+                {
+                    if (clock.time() > deadlineMs)
+                    {
+                        throw new DriverTimeoutException("CnC file is created but not initialised: " +
+                            cncFile.getAbsolutePath());
+                    }
+
+                    sleep(Aeron.Configuration.AWAITING_IDLE_SLEEP_MS);
+                }
+
+                CncFileDescriptor.checkVersion(cncVersion);
+                if (SemanticVersion.minor(cncVersion) < SemanticVersion.minor(CncFileDescriptor.CNC_VERSION))
+                {
+                    throw new AeronException("driverVersion=" + SemanticVersion.toString(cncVersion) +
+                        " insufficient for clientVersion=" +
+                        SemanticVersion.toString(CncFileDescriptor.CNC_VERSION));
+                }
+
+                return metaDataBuffer;
+            }
+            catch (final NoSuchFileException | AccessDeniedException ignore)
+            {
+            }
+            catch (final FileSystemException ex)
+            {
+                // JDK exception translation does not handle `ERROR_SHARING_VIOLATION (32)` and returns
+                // FileSystemException with the error "The process cannot access the file because it is being
+                // used by another process.". Our current thinking is that matching by text is too brittle due
+                // to error message being locale-sensitive on Windows. Therefore, we are going to retry on any
+                // FileSystemException when running on Windows.
+                if (SystemUtil.isWindows())
+                {
+                    continue;
+                }
+
+                throw new AeronException(cncFileErrorMessage(cncFile, ex), ex);
+            }
+            catch (final IOException ex)
+            {
+                throw new AeronException(cncFileErrorMessage(cncFile, ex), ex);
+            }
+        }
+    }
+
+    static ErrorHandler setupErrorHandler(
+        final ErrorHandler userErrorHandler, final DistinctErrorLog errorLog, final PrintStream fallbackErrorStream)
+    {
+        final LoggingErrorHandler loggingErrorHandler = new LoggingErrorHandler(errorLog, fallbackErrorStream);
+        if (null == userErrorHandler)
+        {
+            return loggingErrorHandler;
+        }
+        else
+        {
+            return new ErrorHandlerWrapper(loggingErrorHandler, userErrorHandler);
+        }
+    }
+
+    static void sleep(final long durationMs)
+    {
+        try
+        {
+            Thread.sleep(durationMs);
+        }
+        catch (final InterruptedException ex)
+        {
+            Thread.currentThread().interrupt();
+            throw new AeronException("unexpected interrupt", ex);
+        }
+    }
+
+    private static String cncFileErrorMessage(final File file, final Exception ex)
+    {
+        return "cannot open CnC file: " + file.getAbsolutePath() + " reason=" + ex;
+    }
+
+    private static final class ErrorHandlerWrapper implements ErrorHandler, AutoCloseable
+    {
+        private final LoggingErrorHandler loggingErrorHandler;
+        private final ErrorHandler userErrorHandler;
+
+        private ErrorHandlerWrapper(final LoggingErrorHandler loggingErrorHandler, final ErrorHandler userErrorHandler)
+        {
+            this.loggingErrorHandler = loggingErrorHandler;
+            this.userErrorHandler = userErrorHandler;
+        }
+
+        public void close()
+        {
+            loggingErrorHandler.close();
+            if (userErrorHandler instanceof AutoCloseable)
+            {
+                CloseHelper.quietClose((AutoCloseable)userErrorHandler);
+            }
+        }
+
+        public void onError(final Throwable throwable)
+        {
+            loggingErrorHandler.onError(throwable);
+            userErrorHandler.onError(throwable);
+        }
     }
 }

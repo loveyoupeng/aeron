@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@
  */
 package io.aeron.cluster.client;
 
+import io.aeron.cluster.codecs.AdminRequestType;
+import io.aeron.cluster.codecs.AdminResponseCode;
 import io.aeron.cluster.codecs.EventCode;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
@@ -26,7 +28,7 @@ import org.agrona.DirectBuffer;
 public interface EgressListener
 {
     /**
-     * Message event returned from the clustered service.
+     * Message returned from the clustered service.
      *
      * @param clusterSessionId to which the message belongs.
      * @param timestamp        at which the correlated ingress was sequenced in the cluster.
@@ -43,17 +45,63 @@ public interface EgressListener
         int length,
         Header header);
 
-    default void sessionEvent(
-        long correlationId,
-        long clusterSessionId,
-        long leadershipTermId,
-        int leaderMemberId,
-        EventCode code,
-        String detail)
+    /**
+     * Session event emitted from the cluster which after connect can indicate an error or session close.
+     *
+     * @param correlationId    associated with the cluster ingress.
+     * @param clusterSessionId to which the event belongs.
+     * @param leadershipTermId for identifying the active term of leadership
+     * @param leaderMemberId   identity of the active leader.
+     * @param code             to indicate the type of event.
+     * @param detail           Textual detail to explain the event.
+     */
+    default void onSessionEvent(
+        final long correlationId,
+        final long clusterSessionId,
+        final long leadershipTermId,
+        final int leaderMemberId,
+        final EventCode code,
+        final String detail)
     {
     }
 
-    default void newLeader(long clusterSessionId, long leadershipTermId, int leaderMemberId, String memberEndpoints)
+    /**
+     * Event indicating a new leader has been elected.
+     *
+     * @param clusterSessionId to which the event belongs.
+     * @param leadershipTermId for identifying the active term of leadership
+     * @param leaderMemberId   identity of the active leader.
+     * @param ingressEndpoints for connecting to the cluster.
+     */
+    default void onNewLeader(
+        final long clusterSessionId,
+        final long leadershipTermId,
+        final int leaderMemberId,
+        final String ingressEndpoints)
+    {
+    }
+
+    /**
+     * Message returned in response to an admin request.
+     *
+     * @param clusterSessionId to which the response belongs.
+     * @param correlationId    of the admin request.
+     * @param requestType      of the admin request.
+     * @param responseCode     describing the response.
+     * @param message          describing the response (e.g. error message).
+     * @param payload          delivered with the response, can be empty.
+     * @param payloadOffset    into the payload buffer.
+     * @param payloadLength    of the payload.
+     */
+    default void onAdminResponse(
+        final long clusterSessionId,
+        final long correlationId,
+        final AdminRequestType requestType,
+        final AdminResponseCode responseCode,
+        final String message,
+        final DirectBuffer payload,
+        final int payloadOffset,
+        final int payloadLength)
     {
     }
 }

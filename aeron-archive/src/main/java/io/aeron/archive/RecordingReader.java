@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ import io.aeron.logbuffer.FrameDescriptor;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.BitUtil;
-import org.agrona.IoUtil;
+import org.agrona.BufferUtil;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -28,7 +28,6 @@ import java.io.IOException;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileAttribute;
 import java.util.EnumSet;
 
 import static io.aeron.archive.Archive.segmentFileName;
@@ -42,7 +41,6 @@ import static java.nio.file.StandardOpenOption.READ;
 class RecordingReader implements AutoCloseable
 {
     private static final EnumSet<StandardOpenOption> FILE_OPTIONS = EnumSet.of(READ);
-    private static final FileAttribute<?>[] NO_ATTRIBUTES = new FileAttribute[0];
 
     private final File archiveDir;
     private final long recordingId;
@@ -52,8 +50,8 @@ class RecordingReader implements AutoCloseable
     private final UnsafeBuffer termBuffer;
     private MappedByteBuffer mappedSegmentBuffer;
 
+    private final long replayLimit;
     private long replayPosition;
-    private long replayLimit;
     private long segmentFilePosition;
     private int termOffset;
     private int termBaseSegmentOffset;
@@ -113,14 +111,13 @@ class RecordingReader implements AutoCloseable
         replayLimit = fromPosition + replayLength;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
         closeRecordingSegment();
-    }
-
-    long recordingId()
-    {
-        return recordingId;
     }
 
     long replayPosition()
@@ -197,8 +194,9 @@ class RecordingReader implements AutoCloseable
 
     private void closeRecordingSegment()
     {
-        IoUtil.unmap(mappedSegmentBuffer);
-        mappedSegmentBuffer = null;
+        final MappedByteBuffer mappedSegmentBuffer = this.mappedSegmentBuffer;
+        this.mappedSegmentBuffer = null;
+        BufferUtil.free(mappedSegmentBuffer);
     }
 
     private void openRecordingSegment()
@@ -211,7 +209,7 @@ class RecordingReader implements AutoCloseable
             throw new IllegalArgumentException("failed to open recording segment file " + segmentFileName);
         }
 
-        try (FileChannel channel = FileChannel.open(segmentFile.toPath(), FILE_OPTIONS, NO_ATTRIBUTES))
+        try (FileChannel channel = FileChannel.open(segmentFile.toPath(), FILE_OPTIONS))
         {
             mappedSegmentBuffer = channel.map(READ_ONLY, 0, segmentLength);
         }

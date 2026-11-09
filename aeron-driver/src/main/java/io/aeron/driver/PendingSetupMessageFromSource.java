@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +19,16 @@ import io.aeron.driver.media.ReceiveChannelEndpoint;
 
 import java.net.InetSocketAddress;
 
-class PendingSetupMessageFromSource
+import static io.aeron.driver.DataPacketDispatcher.SessionState.PENDING_SETUP_FRAME;
+
+final class PendingSetupMessageFromSource
 {
     private final int sessionId;
     private final int streamId;
     private final int transportIndex;
     private final boolean periodic;
     private final ReceiveChannelEndpoint channelEndpoint;
-    private final InetSocketAddress controlAddress;
+    private InetSocketAddress controlAddress;
 
     private long timeOfStatusMessageNs;
 
@@ -46,53 +48,71 @@ class PendingSetupMessageFromSource
         this.controlAddress = controlAddress;
     }
 
-    public int sessionId()
+    int sessionId()
     {
         return sessionId;
     }
 
-    public int streamId()
+    int streamId()
     {
         return streamId;
     }
 
-    public int transportIndex()
+    int transportIndex()
     {
         return transportIndex;
     }
 
-    public ReceiveChannelEndpoint channelEndpoint()
+    ReceiveChannelEndpoint channelEndpoint()
     {
         return channelEndpoint;
     }
 
-    public boolean isPeriodic()
+    boolean isPeriodic()
     {
         return periodic;
     }
 
-    public boolean shouldElicitSetupMessage()
+    boolean shouldElicitSetupMessage()
     {
-        return channelEndpoint.shouldElicitSetupMessage();
+        return channelEndpoint.dispatcher().shouldElicitSetupMessage();
     }
 
-    public InetSocketAddress controlAddress()
+    void controlAddress(final InetSocketAddress newControlAddress)
+    {
+        this.controlAddress = newControlAddress;
+    }
+
+    InetSocketAddress controlAddress()
     {
         return controlAddress;
     }
 
-    public long timeOfStatusMessageNs()
+    long timeOfStatusMessageNs()
     {
         return timeOfStatusMessageNs;
     }
 
-    public void timeOfStatusMessageNs(final long nowNs)
+    void timeOfStatusMessageNs(final long nowNs)
     {
         timeOfStatusMessageNs = nowNs;
     }
 
-    public void removeFromDataPacketDispatcher()
+    void removeFromDataPacketDispatcher()
     {
-        channelEndpoint.removePendingSetup(sessionId, streamId);
+        channelEndpoint.dispatcher().removeSessionInterestByState(sessionId, streamId, PENDING_SETUP_FRAME);
+    }
+
+    public String toString()
+    {
+        return "PendingSetupMessageFromSource{" +
+            "sessionId=" + sessionId +
+            ", streamId=" + streamId +
+            ", transportIndex=" + transportIndex +
+            ", periodic=" + periodic +
+            ", channelEndpoint=" + channelEndpoint +
+            ", controlAddress=" + controlAddress +
+            ", timeOfStatusMessageNs=" + timeOfStatusMessageNs +
+            '}';
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,12 +31,17 @@ import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static java.lang.Math.min;
 
 /**
- * Command line utility for inspecting the data contents of a archive segment file.
+ * Command line utility for inspecting the data contents of an archive segment file.
  * <p>
  * Supports {@link LogInspector#AERON_LOG_DATA_FORMAT_PROP_NAME}
  */
 public class SegmentInspector
 {
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         final PrintStream out = System.out;
@@ -76,13 +81,13 @@ public class SegmentInspector
         while (offset < length)
         {
             dataHeaderFlyweight.wrap(buffer, offset, length - offset);
-            out.println(offset + ": " + dataHeaderFlyweight.toString());
 
             final int frameLength = dataHeaderFlyweight.frameLength();
             if (frameLength < DataHeaderFlyweight.HEADER_LENGTH)
             {
                 break;
             }
+            out.println(offset + ": " + dataHeaderFlyweight);
 
             final int limit = min(frameLength - HEADER_LENGTH, messageDumpLimit);
             out.println(LogInspector.formatBytes(buffer, offset + HEADER_LENGTH, limit));

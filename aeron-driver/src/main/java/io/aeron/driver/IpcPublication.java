@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,15 @@
  */
 package io.aeron.driver;
 
+import io.aeron.Aeron;
 import io.aeron.CommonContext;
 import io.aeron.driver.buffer.RawLog;
+import io.aeron.driver.logging.DriverTracing;
 import io.aeron.driver.status.SystemCounters;
 import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.logbuffer.LogBufferUnblocker;
+import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
 import org.agrona.collections.ArrayListUtil;
 import org.agrona.collections.ArrayUtil;
 import org.agrona.concurrent.UnsafeBuffer;
@@ -27,9 +31,12 @@ import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.Position;
 import org.agrona.concurrent.status.ReadablePosition;
 
-import java.util.ArrayList;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.util.*;
 
-import static io.aeron.driver.status.SystemCounterDescriptor.UNBLOCKED_PUBLICATIONS;
+import static io.aeron.ErrorCode.IMAGE_REJECTED;
+import static io.aeron.driver.status.SystemCounterDescriptor.*;
 import static io.aeron.logbuffer.LogBufferDescriptor.*;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
@@ -38,25 +45,34 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public final class IpcPublication implements DriverManagedResource, Subscribable
 {
+    @SuppressWarnings("JavadocVariable")
     enum State
     {
-        ACTIVE, INACTIVE, LINGER
+        ACTIVE, DRAINING, LINGER, DONE
     }
 
     private static final ReadablePosition[] EMPTY_POSITIONS = new ReadablePosition[0];
+    private static final InetSocketAddress IPC_SRC_ADDRESS = new InetSocketAddress(InetAddress.getLoopbackAddress(), 0);
 
     private final long registrationId;
+    private final long tag;
     private final long unblockTimeoutNs;
     private final long untetheredWindowLimitTimeoutNs;
+    private final long untetheredLingerTimeoutNs;
     private final long untetheredRestingTimeoutNs;
-    private final long tag;
+    private final long imageLivenessTimeoutNs;
+    private final long responseCorrelationId;
+    private final String channel;
     private final int sessionId;
     private final int streamId;
-    private final int tripGain;
-    private final int termBufferLength;
-    private final int termWindowLength;
+    private final int startingTermId;
+    private final int startingTermOffset;
     private final int positionBitsToShift;
+    private final int termBufferLength;
+    private final int mtuLength;
+    private final int termWindowLength;
     private final int initialTermId;
+    private final int tripGain;
     private long tripLimit;
     private long consumerPosition;
     private long lastConsumerPosition;
@@ -64,147 +80,236 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
     private long cleanPosition;
     private int refCount = 0;
     private boolean reachedEndOfLife = false;
+    private boolean inCoolDown = false;
+    private long coolDownExpireTimeNs = 0;
     private final boolean isExclusive;
     private State state = State.ACTIVE;
     private final UnsafeBuffer[] termBuffers;
-    private final ArrayList<UntetheredSubscription> untetheredSubscriptions = new ArrayList<>();
-    private ReadablePosition[] subscriberPositions = EMPTY_POSITIONS;
     private final Position publisherPos;
     private final Position publisherLimit;
     private final UnsafeBuffer metaDataBuffer;
+    private ReadablePosition[] subscriberPositions = EMPTY_POSITIONS;
+    private final ArrayList<UntetheredSubscription> untetheredSubscriptions = new ArrayList<>();
     private final RawLog rawLog;
     private final AtomicCounter unblockedPublications;
+    private final AtomicCounter publicationsRevoked;
+    private final ErrorHandler errorHandler;
 
-    public IpcPublication(
+    IpcPublication(
         final long registrationId,
+        final String channel,
+        final MediaDriver.Context ctx,
         final long tag,
         final int sessionId,
         final int streamId,
         final Position publisherPos,
         final Position publisherLimit,
         final RawLog rawLog,
-        final int termWindowLength,
-        final long unblockTimeoutNs,
-        final long untetheredWindowLimitTimeoutNs,
-        final long untetheredRestingTimeoutNs,
-        final long nowNs,
-        final SystemCounters systemCounters,
-        final boolean isExclusive)
+        final boolean isExclusive,
+        final PublicationParams params)
     {
         this.registrationId = registrationId;
+        this.channel = channel;
         this.tag = tag;
         this.sessionId = sessionId;
         this.streamId = streamId;
         this.isExclusive = isExclusive;
         this.termBuffers = rawLog.termBuffers();
-        this.initialTermId = initialTermId(rawLog.metaData());
+        this.initialTermId = LogBufferDescriptor.initialTermId(rawLog.metaData());
+        this.startingTermId = params.termId;
+        this.startingTermOffset = params.termOffset;
+        this.errorHandler = ctx.countedErrorHandler();
 
-        final int termLength = rawLog.termLength();
+        final int termLength = params.termLength;
         this.termBufferLength = termLength;
+        this.mtuLength = params.mtuLength;
         this.positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
-        this.termWindowLength = termWindowLength;
+        this.termWindowLength = params.publicationWindowLength;
         this.tripGain = termWindowLength >> 3;
         this.publisherPos = publisherPos;
         this.publisherLimit = publisherLimit;
         this.rawLog = rawLog;
-        this.unblockTimeoutNs = unblockTimeoutNs;
-        this.untetheredWindowLimitTimeoutNs = untetheredWindowLimitTimeoutNs;
-        this.untetheredRestingTimeoutNs = untetheredRestingTimeoutNs;
+        this.unblockTimeoutNs = ctx.publicationUnblockTimeoutNs();
+        untetheredWindowLimitTimeoutNs = params.untetheredWindowLimitTimeoutNs;
+        untetheredLingerTimeoutNs = params.untetheredLingerTimeoutNs;
+        untetheredRestingTimeoutNs = params.untetheredRestingTimeoutNs;
+        this.imageLivenessTimeoutNs = ctx.imageLivenessTimeoutNs();
+        this.responseCorrelationId = params.responseCorrelationId;
+
+        final SystemCounters systemCounters = ctx.systemCounters();
         this.unblockedPublications = systemCounters.get(UNBLOCKED_PUBLICATIONS);
+        this.publicationsRevoked = systemCounters.get(PUBLICATIONS_REVOKED);
+
         this.metaDataBuffer = rawLog.metaData();
 
         consumerPosition = producerPosition();
         lastConsumerPosition = consumerPosition;
         cleanPosition = consumerPosition;
-        timeOfLastConsumerPositionUpdateNs = nowNs;
+        timeOfLastConsumerPositionUpdateNs = ctx.cachedNanoClock().nanoTime();
     }
 
+    /**
+     * Channel URI string for this publication.
+     *
+     * @return channel URI string for this publication.
+     */
+    public String channel()
+    {
+        return channel;
+    }
+
+    /**
+     * Session id allocated to this stream.
+     *
+     * @return session id allocated to this stream.
+     */
     public int sessionId()
     {
         return sessionId;
     }
 
+    /**
+     * Stream id within the channel.
+     *
+     * @return stream id within the channel.
+     */
     public int streamId()
     {
         return streamId;
     }
 
-    public long registrationId()
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long subscribableRegistrationId()
     {
         return registrationId;
     }
 
-    public long tag()
+    long registrationId()
+    {
+        return registrationId;
+    }
+
+    long tag()
     {
         return tag;
     }
 
-    public boolean isExclusive()
+    boolean isExclusive()
     {
         return isExclusive;
     }
 
-    public RawLog rawLog()
+    int initialTermId()
+    {
+        return initialTermId;
+    }
+
+    int startingTermId()
+    {
+        return startingTermId;
+    }
+
+    int startingTermOffset()
+    {
+        return startingTermOffset;
+    }
+
+    RawLog rawLog()
     {
         return rawLog;
     }
 
-    public int publisherLimitId()
+    int publisherLimitId()
     {
         return publisherLimit.id();
     }
 
-    public int termBufferLength()
+    int termBufferLength()
     {
         return termBufferLength;
     }
 
-    public int mtuLength()
+    int mtuLength()
     {
-        return LogBufferDescriptor.mtuLength(metaDataBuffer);
+        return mtuLength;
     }
 
-    public boolean free()
-    {
-        return rawLog.free();
-    }
-
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
-        publisherPos.close();
-        publisherLimit.close();
-        for (final ReadablePosition position : subscriberPositions)
-        {
-            position.close();
-        }
+        CloseHelper.close(errorHandler, publisherPos);
+        CloseHelper.close(errorHandler, publisherLimit);
+        CloseHelper.closeAll(errorHandler, subscriberPositions);
 
         for (int i = 0, size = untetheredSubscriptions.size(); i < size; i++)
         {
             final UntetheredSubscription untetheredSubscription = untetheredSubscriptions.get(i);
-            if (UntetheredSubscription.RESTING == untetheredSubscription.state)
+            if (UntetheredSubscription.State.RESTING == untetheredSubscription.state)
             {
-                untetheredSubscription.position.close();
+                CloseHelper.close(errorHandler, untetheredSubscription.position);
             }
         }
-
-        rawLog.close();
     }
 
-    public void addSubscriber(final SubscriptionLink subscriptionLink, final ReadablePosition subscriberPosition)
+    void reject(final long position, final String reason, final DriverConductor conductor, final long nowNs)
     {
-        LogBufferDescriptor.isConnected(metaDataBuffer, true);
-        subscriberPositions = ArrayUtil.add(subscriberPositions, subscriberPosition);
+        conductor.onPublicationError(
+            registrationId,
+            Aeron.NULL_VALUE,
+            sessionId(),
+            streamId(),
+            Aeron.NULL_VALUE,
+            Aeron.NULL_VALUE,
+            IPC_SRC_ADDRESS,
+            IMAGE_REJECTED.value(),
+            reason);
 
+        if (!inCoolDown)
+        {
+            updateConnectedStatus(false);
+
+            conductor.unlinkIpcSubscriptions(this);
+
+            CloseHelper.closeAll(errorHandler, subscriberPositions);
+            subscriberPositions = EMPTY_POSITIONS;
+
+            untetheredSubscriptions.clear();
+
+            inCoolDown = true;
+        }
+
+        coolDownExpireTimeNs = nowNs + imageLivenessTimeoutNs;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void addSubscriber(
+        final SubscriptionLink subscriptionLink, final ReadablePosition subscriberPosition, final long nowNs)
+    {
+        subscriberPositions = ArrayUtil.add(subscriberPositions, subscriberPosition);
         if (!subscriptionLink.isTether())
         {
-            untetheredSubscriptions.add(new UntetheredSubscription(
-                subscriptionLink, subscriberPosition, timeOfLastConsumerPositionUpdateNs));
+            untetheredSubscriptions.add(new UntetheredSubscription(subscriptionLink, subscriberPosition, nowNs));
         }
+
+        updateConnectedStatus(true);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void removeSubscriber(final SubscriptionLink subscriptionLink, final ReadablePosition subscriberPosition)
     {
-        consumerPosition = Math.max(consumerPosition, subscriberPosition.getVolatile());
+        consumerPosition = Math.max(consumerPosition, subscriberPosition.getAcquire());
         subscriberPositions = ArrayUtil.remove(subscriberPositions, subscriberPosition);
         subscriberPosition.close();
 
@@ -220,107 +325,158 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             }
         }
 
-        if (subscriberPositions.length == 0)
+        if (0 == subscriberPositions.length)
         {
-            LogBufferDescriptor.isConnected(metaDataBuffer, false);
+            updateConnectedStatus(false);
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         switch (state)
         {
             case ACTIVE:
             {
-                checkUntetheredSubscriptions(timeNs, conductor);
-                final long producerPosition = producerPosition();
-                publisherPos.setOrdered(producerPosition);
-                if (!isExclusive)
+                if (isPublicationRevoked(metaDataBuffer))
                 {
-                    checkForBlockedPublisher(producerPosition, timeNs);
+                    final long revokedPos = producerPosition();
+                    publisherLimit.setRelease(revokedPos);
+                    LogBufferDescriptor.endOfStreamPosition(metaDataBuffer, revokedPos);
+                    updateConnectedStatus(false);
+
+                    conductor.transitionToLinger(this);
+
+                    state = State.LINGER;
+
+                    logRevoke(revokedPos, sessionId(), streamId(), channel());
+                    publicationsRevoked.increment();
+                }
+                else
+                {
+                    checkUntetheredSubscriptions(timeNs, conductor, true);
+                    updateConnectedStatus(0 != subscriberPositions.length);
+                    final long producerPosition = producerPosition();
+                    publisherPos.setRelease(producerPosition);
+                    if (!isExclusive)
+                    {
+                        checkForBlockedPublisher(producerPosition, timeNs);
+                    }
+                    checkCoolDownStatus(timeNs, conductor);
                 }
                 break;
             }
 
-            case INACTIVE:
+            case DRAINING:
             {
+                checkUntetheredSubscriptions(timeNs, conductor, false);
                 final long producerPosition = producerPosition();
-                publisherPos.setOrdered(producerPosition);
+                publisherPos.setRelease(producerPosition);
                 if (isDrained(producerPosition))
                 {
-                    state = State.LINGER;
                     conductor.transitionToLinger(this);
+                    state = State.LINGER;
                 }
                 else if (LogBufferUnblocker.unblock(termBuffers, metaDataBuffer, consumerPosition, termBufferLength))
                 {
-                    unblockedPublications.incrementOrdered();
+                    unblockedPublications.incrementRelease();
                 }
                 break;
             }
 
             case LINGER:
-                reachedEndOfLife = true;
-                conductor.cleanupIpcPublication(this);
+                if (0 == refCount)
+                {
+                    conductor.cleanupIpcPublication(this);
+                    reachedEndOfLife = true;
+                    state = State.DONE;
+                }
+                break;
+
+            case DONE:
                 break;
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;
     }
 
-    public void incRef()
+    void revoke()
+    {
+        LogBufferDescriptor.isPublicationRevoked(metaDataBuffer, true);
+    }
+
+    void incRef()
     {
         ++refCount;
     }
 
-    public void decRef()
+    void decRef()
     {
         if (0 == --refCount)
         {
-            state = State.INACTIVE;
             final long producerPosition = producerPosition();
-            publisherLimit.setOrdered(producerPosition);
+            publisherLimit.setRelease(producerPosition);
             LogBufferDescriptor.endOfStreamPosition(metaDataBuffer, producerPosition);
+
+            if (!LogBufferDescriptor.isPublicationRevoked(metaDataBuffer))
+            {
+                state = State.DRAINING;
+            }
         }
     }
 
-    int updatePublisherLimit()
+    int updatePublisherPositionAndLimit()
     {
         int workCount = 0;
-        long minSubscriberPosition = Long.MAX_VALUE;
-        long maxSubscriberPosition = consumerPosition;
 
-        for (final ReadablePosition subscriberPosition : subscriberPositions)
+        if (State.ACTIVE == state)
         {
-            final long position = subscriberPosition.getVolatile();
-            minSubscriberPosition = Math.min(minSubscriberPosition, position);
-            maxSubscriberPosition = Math.max(maxSubscriberPosition, position);
-        }
+            final long producerPosition = producerPosition();
+            publisherPos.setRelease(producerPosition);
 
-        if (subscriberPositions.length > 0)
-        {
-            if (maxSubscriberPosition > consumerPosition)
+            if (subscriberPositions.length > 0)
             {
-                consumerPosition = maxSubscriberPosition;
+                long minSubscriberPosition = Long.MAX_VALUE;
+                long maxSubscriberPosition = consumerPosition;
+
+                for (final ReadablePosition subscriberPosition : subscriberPositions)
+                {
+                    final long position = subscriberPosition.getAcquire();
+                    minSubscriberPosition = Math.min(minSubscriberPosition, position);
+                    maxSubscriberPosition = Math.max(maxSubscriberPosition, position);
+                }
+
+                if (maxSubscriberPosition > consumerPosition)
+                {
+                    consumerPosition = maxSubscriberPosition;
+                }
+
+                final long newLimitPosition = minSubscriberPosition + termWindowLength;
+                if (newLimitPosition >= tripLimit)
+                {
+                    cleanBufferTo(minSubscriberPosition);
+                    publisherLimit.setRelease(newLimitPosition);
+                    tripLimit = newLimitPosition + tripGain;
+                    workCount = 1;
+                }
             }
-
-            final long proposedLimit = minSubscriberPosition + termWindowLength;
-            if (proposedLimit > tripLimit)
+            else if (publisherLimit.get() > consumerPosition)
             {
-                cleanBufferTo(minSubscriberPosition);
-                publisherLimit.setOrdered(proposedLimit);
-                tripLimit = proposedLimit + tripGain;
-
+                tripLimit = consumerPosition;
+                publisherLimit.setRelease(consumerPosition);
+                cleanBufferTo(consumerPosition);
                 workCount = 1;
             }
-        }
-        else if (publisherLimit.get() > consumerPosition)
-        {
-            tripLimit = consumerPosition;
-            publisherLimit.setOrdered(consumerPosition);
-            cleanBufferTo(consumerPosition);
         }
 
         return workCount;
@@ -328,7 +484,18 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
 
     long joinPosition()
     {
-        return consumerPosition;
+        long position = consumerPosition;
+
+        for (final ReadablePosition subscriberPosition : subscriberPositions)
+        {
+            final long subPos = subscriberPosition.getAcquire();
+            if (subPos < position)
+            {
+                position = subPos;
+            }
+        }
+
+        return position;
     }
 
     long producerPosition()
@@ -349,62 +516,97 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         return state;
     }
 
-    private void checkUntetheredSubscriptions(final long nowNs, final DriverConductor conductor)
+    boolean isAcceptingSubscriptions()
     {
-        final ArrayList<UntetheredSubscription> untetheredSubscriptions = this.untetheredSubscriptions;
-        final int untetheredSubscriptionsSize = untetheredSubscriptions.size();
-        if (0 == untetheredSubscriptionsSize)
-        {
-            return;
-        }
+        return !inCoolDown && (State.ACTIVE == state || (State.DRAINING == state && !isDrained(producerPosition())));
+    }
 
-        final long untetheredWindowLimit = (consumerPosition - termWindowLength) + (termWindowLength >> 3);
+    long responseCorrelationId()
+    {
+        return responseCorrelationId;
+    }
 
-        for (int lastIndex = untetheredSubscriptionsSize - 1, i = lastIndex; i >= 0; i--)
+    private void checkUntetheredSubscriptions(
+        final long nowNs, final DriverConductor conductor, final boolean allowRejoin)
+    {
+        final long untetheredWindowLimit = (consumerPosition - termWindowLength) + (termWindowLength >> 2);
+
+        for (int lastIndex = untetheredSubscriptions.size() - 1, i = lastIndex; i >= 0; i--)
         {
             final UntetheredSubscription untethered = untetheredSubscriptions.get(i);
-            switch (untethered.state)
+            if (UntetheredSubscription.State.ACTIVE == untethered.state)
             {
-                case UntetheredSubscription.ACTIVE:
-                    if (untethered.position.getVolatile() > untetheredWindowLimit)
+                if (untethered.position.getAcquire() > untetheredWindowLimit)
+                {
+                    untethered.timeOfLastUpdateNs = nowNs;
+                }
+                else if ((untethered.timeOfLastUpdateNs + untetheredWindowLimitTimeoutNs) - nowNs <= 0)
+                {
+                    conductor.notifyUnavailableImageLink(registrationId, untethered.subscriptionLink);
+                    untethered.state(UntetheredSubscription.State.LINGER, nowNs, streamId, sessionId);
+                }
+            }
+            else if (UntetheredSubscription.State.LINGER == untethered.state)
+            {
+                if ((untethered.timeOfLastUpdateNs + untetheredLingerTimeoutNs) - nowNs <= 0)
+                {
+                    subscriberPositions = ArrayUtil.remove(subscriberPositions, untethered.position);
+                    if (allowRejoin && untethered.subscriptionLink.isRejoin())
                     {
-                        untethered.timeOfLastUpdateNs = nowNs;
+                        untethered.state(UntetheredSubscription.State.RESTING, nowNs, streamId, sessionId);
                     }
-                    else if ((untethered.timeOfLastUpdateNs + untetheredWindowLimitTimeoutNs) - nowNs <= 0)
+                    else
                     {
-                        conductor.notifyUnavailableImageLink(registrationId, untethered.subscriptionLink);
-                        untethered.state = UntetheredSubscription.LINGER;
-                        untethered.timeOfLastUpdateNs = nowNs;
+                        ArrayListUtil.fastUnorderedRemove(untetheredSubscriptions, i, lastIndex--);
+                        untethered.position.close();
                     }
-                    break;
-
-                case UntetheredSubscription.LINGER:
-                    if ((untethered.timeOfLastUpdateNs + untetheredWindowLimitTimeoutNs) - nowNs <= 0)
-                    {
-                        subscriberPositions = ArrayUtil.remove(subscriberPositions, untethered.position);
-                        untethered.state = UntetheredSubscription.RESTING;
-                        untethered.timeOfLastUpdateNs = nowNs;
-                    }
-                    break;
-
-                case UntetheredSubscription.RESTING:
+                }
+            }
+            else if (UntetheredSubscription.State.RESTING == untethered.state)
+            {
+                if (allowRejoin)
+                {
                     if ((untethered.timeOfLastUpdateNs + untetheredRestingTimeoutNs) - nowNs <= 0)
                     {
+                        final long joinPosition = joinPosition();
                         subscriberPositions = ArrayUtil.add(subscriberPositions, untethered.position);
                         conductor.notifyAvailableImageLink(
                             registrationId,
                             sessionId,
                             untethered.subscriptionLink,
                             untethered.position.id(),
-                            consumerPosition,
+                            joinPosition,
                             rawLog.fileName(),
                             CommonContext.IPC_CHANNEL);
-                        LogBufferDescriptor.isConnected(metaDataBuffer, true);
-                        untethered.state = UntetheredSubscription.ACTIVE;
-                        untethered.timeOfLastUpdateNs = nowNs;
+                        untethered.state(UntetheredSubscription.State.ACTIVE, nowNs, streamId, sessionId);
                     }
-                    break;
+                }
+                else
+                {
+                    ArrayListUtil.fastUnorderedRemove(untetheredSubscriptions, i, lastIndex--);
+                    untethered.position.close();
+                }
             }
+        }
+    }
+
+    private void updateConnectedStatus(final boolean newStatus)
+    {
+        if (LogBufferDescriptor.isConnected(metaDataBuffer) != newStatus)
+        {
+            LogBufferDescriptor.isConnected(metaDataBuffer, newStatus);
+        }
+    }
+
+    private void checkCoolDownStatus(final long timeNs, final DriverConductor conductor)
+    {
+        if (inCoolDown && coolDownExpireTimeNs < timeNs)
+        {
+            inCoolDown = false;
+
+            conductor.linkIpcSubscriptions(this);
+
+            coolDownExpireTimeNs = 0;
         }
     }
 
@@ -412,7 +614,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
     {
         for (final ReadablePosition subscriberPosition : subscriberPositions)
         {
-            if (subscriberPosition.getVolatile() < producerPosition)
+            if (subscriberPosition.getAcquire() < producerPosition)
             {
                 return false;
             }
@@ -431,7 +633,7 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
             {
                 if (LogBufferUnblocker.unblock(termBuffers, metaDataBuffer, consumerPosition, termBufferLength))
                 {
-                    unblockedPublications.incrementOrdered();
+                    unblockedPublications.incrementRelease();
                 }
             }
         }
@@ -460,15 +662,24 @@ public final class IpcPublication implements DriverManagedResource, Subscribable
         final long cleanPosition = this.cleanPosition;
         if (position > cleanPosition)
         {
-            final UnsafeBuffer dirtyTerm = termBuffers[indexByPosition(cleanPosition, positionBitsToShift)];
+            final UnsafeBuffer dirtyTermBuffer = termBuffers[indexByPosition(cleanPosition, positionBitsToShift)];
             final int bytesForCleaning = (int)(position - cleanPosition);
             final int bufferCapacity = termBufferLength;
             final int termOffset = (int)cleanPosition & (bufferCapacity - 1);
             final int length = Math.min(bytesForCleaning, bufferCapacity - termOffset);
 
-            dirtyTerm.setMemory(termOffset + SIZE_OF_LONG, length - SIZE_OF_LONG, (byte)0);
-            dirtyTerm.putLongOrdered(termOffset, 0);
+            dirtyTermBuffer.setMemory(termOffset + SIZE_OF_LONG, length - SIZE_OF_LONG, (byte)0);
+            dirtyTermBuffer.putLongRelease(termOffset, 0);
             this.cleanPosition = cleanPosition + length;
         }
+    }
+
+    private static void logRevoke(
+        final long revokedPos,
+        final int sessionId,
+        final int streamId,
+        final String channel)
+    {
+        DriverTracing.tracePublicationRevoke(revokedPos, sessionId, streamId, channel);
     }
 }

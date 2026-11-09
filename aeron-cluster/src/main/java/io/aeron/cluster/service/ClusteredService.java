@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.cluster.service;
 
+import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.Publication;
 import io.aeron.cluster.codecs.CloseReason;
@@ -25,16 +26,26 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Interface which a service must implement to be contained in the cluster.
+ * <p>
+ * The {@code cluster} object should only be used to send messages to the cluster or schedule timers in
+ * response to other messages and timers. Sending messages and timers should not happen from cluster lifecycle
+ * methods like {@link #onStart(Cluster, Image)}, {@link #onRoleChange(Cluster.Role)} or
+ * {@link #onTakeSnapshot(ExclusivePublication)}, or {@link #onTerminate(Cluster)}, except the session lifecycle
+ * methods.
  */
 public interface ClusteredService
 {
     /**
-     * Start event for the service where the service can perform any initialisation required and load snapshot state.
+     * Start event where the service can perform any initialisation required and load snapshot state.
      * The snapshot image can be null if no previous snapshot exists.
      * <p>
-     * <b>Note:</b> As this is a potentially long running operation the implementation should occasional call
-     * {@link Cluster#idle()} or {@link Cluster#idle(int)}, especially when polling the snapshot {@link Image}
-     * returns 0.
+     * <b>Note:</b> As this is a potentially long-running operation the implementation should use
+     * {@link Cluster#idleStrategy()} and then occasionally call {@link org.agrona.concurrent.IdleStrategy#idle()} or
+     * {@link org.agrona.concurrent.IdleStrategy#idle(int)}, especially when polling the {@link Image} returns 0.
+     * <p>
+     * If a {@link RuntimeException} is thrown from this method, e.g. {@link IllegalStateException}, then this will
+     * cause the ClusteredServiceAgent and the ConsensusModuleAgent to shut down with an
+     * {@link org.agrona.concurrent.AgentTerminationException}.
      *
      * @param cluster       with which the service can interact.
      * @param snapshotImage from which the service can load its archived state which can be null when no snapshot.
@@ -85,14 +96,16 @@ public interface ClusteredService
     void onTimerEvent(long correlationId, long timestamp);
 
     /**
-     * The service should take a snapshot and store its state to the provided archive {@link Publication}.
+     * The service should take a snapshot and store its state to the provided archive {@link ExclusivePublication}.
      * <p>
-     * <b>Note:</b> As this is a potentially long running operation the implementation should occasional call
-     * {@link Cluster#idle()} or {@link Cluster#idle(int)}, especially in the event of back pressure.
+     * <b>Note:</b> As this is a potentially long-running operation the implementation should use
+     * {@link Cluster#idleStrategy()} and then occasionally call {@link org.agrona.concurrent.IdleStrategy#idle()} or
+     * {@link org.agrona.concurrent.IdleStrategy#idle(int)},
+     * especially when the snapshot {@link ExclusivePublication} returns {@link Publication#BACK_PRESSURED}.
      *
      * @param snapshotPublication to which the state should be recorded.
      */
-    void onTakeSnapshot(Publication snapshotPublication);
+    void onTakeSnapshot(ExclusivePublication snapshotPublication);
 
     /**
      * Notify that the cluster node has changed role.
@@ -102,7 +115,7 @@ public interface ClusteredService
     void onRoleChange(Cluster.Role newRole);
 
     /**
-     * Called when the container is going to terminate.
+     * Called when the container is going to terminate but only after a successful start.
      *
      * @param cluster with which the service can interact.
      */
@@ -121,14 +134,34 @@ public interface ClusteredService
      * @param appVersion          for the application configured in the consensus module.
      */
     default void onNewLeadershipTermEvent(
-        long leadershipTermId,
-        long logPosition,
-        long timestamp,
-        long termBaseLogPosition,
-        int leaderMemberId,
-        int logSessionId,
-        TimeUnit timeUnit,
-        int appVersion)
+        final long leadershipTermId,
+        final long logPosition,
+        final long timestamp,
+        final long termBaseLogPosition,
+        final int leaderMemberId,
+        final int logSessionId,
+        final TimeUnit timeUnit,
+        final int appVersion)
     {
+    }
+
+    /**
+     * Implement this method to perform background tasks that are not related to the deterministic state machine
+     * model, such as keeping external connections alive to the cluster. This method must <b>not</b> be used to
+     * directly, or indirectly, update the service state. This method cannot be used for making calls on
+     * {@link Cluster} which could update the log such as {@link Cluster#scheduleTimer(long, long)} or
+     * {@link Cluster#offer(DirectBuffer, int, int)}.
+     * <p>
+     * This method is not for long-running operations. Time taken can impact latency and should only be used for
+     * short constant time operations.
+     *
+     * @param nowNs which can be used for measuring elapsed time and be used in the same way as
+     *              {@link System#nanoTime()}. This is <b>not</b> {@link Cluster#time()}.
+     * @return 0 if no work is done otherwise a positive number.
+     * @since 1.40.0
+     */
+    default int doBackgroundWork(final long nowNs)
+    {
+        return 0;
     }
 }

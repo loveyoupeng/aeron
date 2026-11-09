@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,87 +15,51 @@
  */
 package io.aeron.samples.raw;
 
-import org.agrona.nio.NioSelectedKeySet;
-
 import java.io.IOException;
-import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.StandardSocketOptions;
 import java.nio.channels.DatagramChannel;
-import java.nio.channels.Selector;
 
 /**
  * Common configuration and functions used across raw samples.
  */
 public class Common
 {
+    /**
+     * Number of message to exchange.
+     */
     public static final int NUM_MESSAGES = 10_000;
 
-    public static final int PONG_PORT = 40123;
-    public static final int PING_PORT = 50123;
+    /**
+     * UDP port on which Pong will listen.
+     */
+    public static final int PONG_PORT = 20123;
 
-    static final Field SELECTED_KEYS_FIELD;
-    static final Field PUBLIC_SELECTED_KEYS_FIELD;
+    /**
+     * UDP port on which Ping will listen.
+     */
+    public static final int PING_PORT = 20124;
 
-    static
-    {
-        Field selectKeysField = null;
-        Field publicSelectKeysField = null;
+    /**
+     * Address to send ping messages to. Pong should listen to this address.
+     */
+    public static final String PING_DEST = System.getProperty("io.aeron.raw.ping.dest", "localhost");
 
-        try
-        {
-            final Class<?> clazz = Class.forName("sun.nio.ch.SelectorImpl", false, ClassLoader.getSystemClassLoader());
+    /**
+     * Address to send pong messages to. Ping should listen to this address
+     */
+    public static final String PONG_DEST = System.getProperty("io.aeron.raw.pong.dest", "localhost");
 
-            if (clazz.isAssignableFrom(Selector.open().getClass()))
-            {
-                selectKeysField = clazz.getDeclaredField("selectedKeys");
-                selectKeysField.setAccessible(true);
-
-                publicSelectKeysField = clazz.getDeclaredField("publicSelectedKeys");
-                publicSelectKeysField.setAccessible(true);
-            }
-        }
-        catch (final Exception ignore)
-        {
-        }
-
-        SELECTED_KEYS_FIELD = selectKeysField;
-        PUBLIC_SELECTED_KEYS_FIELD = publicSelectKeysField;
-    }
-
-    public static void init(final DatagramChannel channel) throws IOException
+    static void init(final DatagramChannel channel) throws IOException
     {
         channel.configureBlocking(false);
         channel.setOption(StandardSocketOptions.SO_REUSEADDR, true);
     }
 
-    public static void init(final DatagramChannel channel, final InetSocketAddress sendAddress)
-        throws IOException
+    static void init(final DatagramChannel channel, final InetSocketAddress sendAddress) throws IOException
     {
         channel.configureBlocking(false);
         channel.setOption(StandardSocketOptions.SO_REUSEADDR, true);
         channel.connect(sendAddress);
-    }
-
-    public static NioSelectedKeySet keySet(final Selector selector)
-    {
-        NioSelectedKeySet tmpSet = null;
-
-        if (null != PUBLIC_SELECTED_KEYS_FIELD)
-        {
-            try
-            {
-                tmpSet = new NioSelectedKeySet();
-
-                SELECTED_KEYS_FIELD.set(selector, tmpSet);
-                PUBLIC_SELECTED_KEYS_FIELD.set(selector, tmpSet);
-            }
-            catch (final Exception ignore)
-            {
-                tmpSet = null;
-            }
-        }
-
-        return tmpSet;
     }
 }

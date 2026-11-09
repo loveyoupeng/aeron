@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,12 +24,33 @@ import io.aeron.archive.client.RecordingDescriptorConsumer;
  */
 class RecordingExtent implements RecordingDescriptorConsumer
 {
+    /**
+     * Id of the recording.
+     */
     public long recordingId;
+    /**
+     * Start position.
+     */
     public long startPosition;
+    /**
+     * Stop position.
+     */
     public long stopPosition;
+    /**
+     * Initial term id.
+     */
     public int initialTermId;
+    /**
+     * Term buffer length.
+     */
     public int termBufferLength;
+    /**
+     * MTU length.
+     */
     public int mtuLength;
+    /**
+     * Session id.
+     */
     public int sessionId;
 
     public void onRecordingDescriptor(

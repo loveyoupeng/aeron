@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,12 @@
  * limitations under the License.
  */
 
-#include <cstdint>
 #include <cstdio>
-#include <signal.h>
 #include <thread>
-#include <array>
-
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
+#include <cinttypes>
+#include <csignal>
+#include <climits>
+#include <random>
 
 #include "util/CommandOptionParser.h"
 #include "concurrent/BusySpinIdleStrategy.h"
@@ -34,7 +32,7 @@ using namespace aeron;
 
 std::atomic<bool> running(true);
 
-void sigIntHandler(int param)
+void sigIntHandler(int)
 {
     running = false;
 }
@@ -51,17 +49,17 @@ static const char optProgress = 'P';
 
 struct Settings
 {
-    std::string dirPrefix = "";
+    std::string dirPrefix;
     std::string channel = samples::configuration::DEFAULT_CHANNEL;
     std::int32_t streamId = samples::configuration::DEFAULT_STREAM_ID;
-    long numberOfMessages = samples::configuration::DEFAULT_NUMBER_OF_MESSAGES;
+    long long numberOfMessages = samples::configuration::DEFAULT_NUMBER_OF_MESSAGES;
     int messageLength = samples::configuration::DEFAULT_MESSAGE_LENGTH;
     int lingerTimeoutMs = samples::configuration::DEFAULT_LINGER_TIMEOUT_MS;
     bool randomMessageLength = samples::configuration::DEFAULT_RANDOM_MESSAGE_LENGTH;
     bool progress = samples::configuration::DEFAULT_PUBLICATION_RATE_PROGRESS;
 };
 
-Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
+Settings parseCmdLine(CommandOptionParser &cp, int argc, char **argv)
 {
     cp.parse(argc, argv);
     if (cp.getOption(optHelp).isPresent())
@@ -75,7 +73,7 @@ Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
     s.dirPrefix = cp.getOption(optPrefix).getParam(0, s.dirPrefix);
     s.channel = cp.getOption(optChannel).getParam(0, s.channel);
     s.streamId = cp.getOption(optStreamId).getParamAsInt(0, 1, INT32_MAX, s.streamId);
-    s.numberOfMessages = cp.getOption(optMessages).getParamAsLong(0, 0, LONG_MAX, s.numberOfMessages);
+    s.numberOfMessages = cp.getOption(optMessages).getParamAsLong(0, 0, INT64_MAX, s.numberOfMessages);
     s.messageLength = cp.getOption(optLength).getParamAsInt(0, sizeof(std::int64_t), INT32_MAX, s.messageLength);
     s.lingerTimeoutMs = cp.getOption(optLinger).getParamAsInt(0, 0, 60 * 60 * 1000, s.lingerTimeoutMs);
     s.randomMessageLength = cp.getOption(optRandLen).isPresent();
@@ -86,12 +84,12 @@ Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
 
 std::atomic<bool> printingActive;
 
-void printRate(double messagesPerSec, double bytesPerSec, long totalFragments, long totalBytes)
+void printRate(double messagesPerSec, double bytesPerSec, std::int64_t totalFragments, std::int64_t totalBytes)
 {
     if (printingActive)
     {
         std::printf(
-            "%.04g msgs/sec, %.04g bytes/sec, totals %ld messages %ld MB payloads\n",
+            "%.04g msgs/sec, %.04g bytes/sec, totals %" PRId64 " messages %" PRId64 " MB payloads\n",
             messagesPerSec, bytesPerSec, totalFragments, totalBytes / (1024 * 1024));
     }
 }
@@ -109,10 +107,7 @@ on_new_length_t composeLengthGenerator(bool random, int max)
         std::uniform_int_distribution<int>::param_type param(sizeof(std::int64_t), max);
         uniformLengthDistribution.param(param);
 
-        return [&]()
-        {
-            return uniformLengthDistribution(randomEngine);
-        };
+        return [&]() { return uniformLengthDistribution(randomEngine); };
     }
     else
     {
@@ -133,17 +128,17 @@ int main(int argc, char **argv)
     cp.addOption(CommandOption(optLength,   1, 1, "length          Length of Messages."));
     cp.addOption(CommandOption(optLinger,   1, 1, "milliseconds    Linger timeout in milliseconds."));
 
-    signal (SIGINT, sigIntHandler);
+    std::shared_ptr<std::thread> rateReporterThread;
 
     try
     {
         Settings settings = parseCmdLine(cp, argc, argv);
 
         std::cout << "Streaming " << toStringWithCommas(settings.numberOfMessages) << " messages of"
-            << (settings.randomMessageLength ? " random" : "") << " payload length "
-            << settings.messageLength << " bytes to "
-            << settings.channel << " on stream ID "
-            << settings.streamId << std::endl;
+                  << (settings.randomMessageLength ? " random" : "") << " payload length "
+                  << settings.messageLength << " bytes to "
+                  << settings.channel << " on stream ID "
+                  << settings.streamId << std::endl;
 
         aeron::Context context;
 
@@ -153,13 +148,13 @@ int main(int argc, char **argv)
         }
 
         context.newPublicationHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
             {
                 std::cout << "Publication: " << channel << " " << correlationId << ":" << streamId << ":" << sessionId << std::endl;
             });
 
         Aeron aeron(context);
-
+        signal(SIGINT, sigIntHandler);
         std::int64_t id = aeron.addPublication(settings.channel, settings.streamId);
         std::shared_ptr<Publication> publication = aeron.findPublication(id);
 
@@ -176,7 +171,19 @@ int main(int argc, char **argv)
         BusySpinIdleStrategy offerIdleStrategy;
         on_new_length_t lengthGenerator = composeLengthGenerator(settings.randomMessageLength, settings.messageLength);
         RateReporter rateReporter(std::chrono::seconds(1), printRate);
-        std::shared_ptr<std::thread> rateReporterThread;
+        Publication *publicationPtr = publication.get();
+
+        aeron::util::OnScopeExit tidy(
+            [&]()
+            {
+                rateReporter.halt();
+
+                if (nullptr != rateReporterThread && rateReporterThread->joinable())
+                {
+                    rateReporterThread->join();
+                    rateReporterThread = nullptr;
+                }
+            });
 
         if (settings.progress)
         {
@@ -193,13 +200,13 @@ int main(int argc, char **argv)
                 rateReporter.reset();
             }
 
-            for (long i = 0; i < settings.numberOfMessages && running; i++)
+            for (std::int64_t i = 0; i < settings.numberOfMessages && running; i++)
             {
                 const int length = lengthGenerator();
                 srcBuffer.putInt64(0, i);
 
                 offerIdleStrategy.reset();
-                while (publication->offer(srcBuffer, 0, length) < 0L)
+                while (publicationPtr->offer(srcBuffer, 0, length) < 0L)
                 {
                     backPressureCount++;
 
@@ -220,7 +227,7 @@ int main(int argc, char **argv)
             }
 
             std::cout << "Done streaming. Back pressure ratio ";
-            std::cout << ((double)backPressureCount / settings.numberOfMessages) << std::endl;
+            std::cout << ((double)backPressureCount / (double)settings.numberOfMessages) << std::endl;
 
             if (running && settings.lingerTimeoutMs > 0)
             {
@@ -231,26 +238,19 @@ int main(int argc, char **argv)
             printingActive = false;
         }
         while (running && continuationBarrier("Execute again?"));
-
-        rateReporter.halt();
-
-        if (nullptr != rateReporterThread)
-        {
-            rateReporterThread->join();
-        }
     }
-    catch (const CommandOptionException& e)
+    catch (const CommandOptionException &e)
     {
         std::cerr << "ERROR: " << e.what() << std::endl << std::endl;
         cp.displayOptionsHelp(std::cerr);
         return -1;
     }
-    catch (const SourcedException& e)
+    catch (const SourcedException &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << e.where() << std::endl;
         return -1;
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << std::endl;
         return -1;

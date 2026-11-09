@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,15 +17,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <thread>
-#include <array>
-#include <signal.h>
-
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
+#include <csignal>
 
 extern "C"
 {
-#include <hdr_histogram.h>
+#include <hdr/hdr_histogram.h>
 }
 
 #include "Configuration.h"
@@ -40,7 +36,7 @@ using namespace aeron;
 
 std::atomic<bool> running(true);
 
-void sigIntHandler(int param)
+void sigIntHandler(int)
 {
     running = false;
 }
@@ -58,18 +54,18 @@ static const char optWarmupMessages = 'w';
 
 struct Settings
 {
-    std::string dirPrefix = "";
+    std::string dirPrefix;
     std::string pingChannel = samples::configuration::DEFAULT_PING_CHANNEL;
     std::string pongChannel = samples::configuration::DEFAULT_PONG_CHANNEL;
     std::int32_t pingStreamId = samples::configuration::DEFAULT_PING_STREAM_ID;
     std::int32_t pongStreamId = samples::configuration::DEFAULT_PONG_STREAM_ID;
-    long numberOfWarmupMessages = samples::configuration::DEFAULT_NUMBER_OF_WARM_UP_MESSAGES;
-    long numberOfMessages = samples::configuration::DEFAULT_NUMBER_OF_MESSAGES;
+    long long numberOfWarmupMessages = samples::configuration::DEFAULT_NUMBER_OF_WARM_UP_MESSAGES;
+    long long numberOfMessages = samples::configuration::DEFAULT_NUMBER_OF_MESSAGES;
     int messageLength = samples::configuration::DEFAULT_MESSAGE_LENGTH;
     int fragmentCountLimit = samples::configuration::DEFAULT_FRAGMENT_COUNT_LIMIT;
 };
 
-Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
+Settings parseCmdLine(CommandOptionParser &cp, int argc, char **argv)
 {
     cp.parse(argc, argv);
     if (cp.getOption(optHelp).isPresent())
@@ -85,19 +81,19 @@ Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
     s.pongChannel = cp.getOption(optPongChannel).getParam(0, s.pongChannel);
     s.pingStreamId = cp.getOption(optPingStreamId).getParamAsInt(0, 1, INT32_MAX, s.pingStreamId);
     s.pongStreamId = cp.getOption(optPongStreamId).getParamAsInt(0, 1, INT32_MAX, s.pongStreamId);
-    s.numberOfMessages = cp.getOption(optMessages).getParamAsLong(0, 0, LONG_MAX, s.numberOfMessages);
+    s.numberOfMessages = cp.getOption(optMessages).getParamAsLong(0, 0, INT64_MAX, s.numberOfMessages);
     s.messageLength = cp.getOption(optLength).getParamAsInt(0, sizeof(std::int64_t), INT32_MAX, s.messageLength);
     s.fragmentCountLimit = cp.getOption(optFrags).getParamAsInt(0, 1, INT32_MAX, s.fragmentCountLimit);
-    s.numberOfWarmupMessages = cp.getOption(optWarmupMessages).getParamAsLong(0, 0, LONG_MAX, s.numberOfWarmupMessages);
+    s.numberOfWarmupMessages = cp.getOption(optWarmupMessages).getParamAsLong(0, 0, INT64_MAX, s.numberOfWarmupMessages);
 
     return s;
 }
 
 void sendPingAndReceivePong(
-    const fragment_handler_t& fragmentHandler,
-    Publication& publication,
-    Subscription& subscription,
-    const Settings& settings)
+    const fragment_handler_t &fragmentHandler,
+    Publication &publication,
+    Subscription &subscription,
+    const Settings &settings)
 {
     std::unique_ptr<std::uint8_t[]> buffer(new std::uint8_t[settings.messageLength]);
     concurrent::AtomicBuffer srcBuffer(buffer.get(), static_cast<size_t>(settings.messageLength));
@@ -109,29 +105,25 @@ void sendPingAndReceivePong(
     }
 
     std::shared_ptr<Image> imageSharedPtr = subscription.imageByIndex(0);
-    Image& image = *imageSharedPtr;
+    Image &image = *imageSharedPtr;
 
-    for (long i = 0; i < settings.numberOfMessages; i++)
+    for (std::int64_t i = 0; i < settings.numberOfMessages; i++)
     {
         std::int64_t position;
 
         do
         {
-            // timestamps in the message are relative to this app, so just send the timepoint directly.
+            // timestamps in the message are relative to this app, so just send the timestamp directly.
             steady_clock::time_point start = steady_clock::now();
-
-            srcBuffer.putBytes(0, (std::uint8_t*)&start, sizeof(steady_clock::time_point));
+            srcBuffer.putBytes(0, (std::uint8_t *)&start, sizeof(steady_clock::time_point));
         }
         while ((position = publication.offer(srcBuffer, 0, settings.messageLength)) < 0L);
 
-        do
+        while (image.position() < position)
         {
-            while (image.poll(fragmentHandler, settings.fragmentCountLimit) <= 0)
-            {
-                idleStrategy.idle();
-            }
+            int fragments = image.poll(fragmentHandler, settings.fragmentCountLimit);
+            idleStrategy.idle(fragments);
         }
-        while (image.position() < position);
     }
 }
 
@@ -175,7 +167,7 @@ int main(int argc, char **argv)
     cp.addOption(CommandOption(optFrags,          1, 1, "limit           Fragment Count Limit."));
     cp.addOption(CommandOption(optWarmupMessages, 1, 1, "number          Number of Messages for warmup."));
 
-    signal (SIGINT, sigIntHandler);
+    std::shared_ptr<std::thread> pongThread;
 
     try
     {
@@ -194,13 +186,13 @@ int main(int argc, char **argv)
         }
 
         context.newSubscriptionHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int64_t correlationId)
             {
                 std::cout << "Subscription: " << channel << " " << correlationId << ":" << streamId << std::endl;
             });
 
         context.newPublicationHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
             {
                 std::cout << "Publication: " << channel << " " << correlationId << ":" << streamId << ":" << sessionId << std::endl;
             });
@@ -226,7 +218,7 @@ int main(int argc, char **argv)
         context.preTouchMappedMemory(true);
 
         std::shared_ptr<Aeron> aeron = Aeron::connect(context);
-
+        signal(SIGINT, sigIntHandler);
         pongSubscriptionId = aeron->addSubscription(settings.pongChannel, settings.pongStreamId);
         pingPublicationId = aeron->addPublication(settings.pingChannel, settings.pingStreamId);
         pingSubscriptionId = aeron->addSubscription(settings.pingChannel, settings.pingStreamId);
@@ -245,12 +237,12 @@ int main(int argc, char **argv)
             std::this_thread::yield();
         }
 
-        Publication& pongPublicationRef = *pongPublication;
-        Subscription& pingSubscriptionRef = *pingSubscription;
+        Publication &pongPublicationRef = *pongPublication;
+        Subscription &pingSubscriptionRef = *pingSubscription;
         BusySpinIdleStrategy idleStrategy;
         BusySpinIdleStrategy pingHandlerIdleStrategy;
         FragmentAssembler pingFragmentAssembler(
-            [&](AtomicBuffer& buffer, index_t offset, index_t length, const Header& header)
+            [&](AtomicBuffer &buffer, index_t offset, index_t length, const Header &header)
             {
                 if (pongPublicationRef.offer(buffer, offset, length) > 0L)
                 {
@@ -265,7 +257,7 @@ int main(int argc, char **argv)
 
         fragment_handler_t ping_handler = pingFragmentAssembler.handler();
 
-        std::thread pongThread(
+        pongThread = std::make_shared<std::thread>(
             [&]()
             {
                 while (!pingSubscriptionRef.isConnected())
@@ -274,11 +266,23 @@ int main(int argc, char **argv)
                 }
 
                 std::shared_ptr<Image> imageSharedPtr = pingSubscriptionRef.imageByIndex(0);
-                Image& image = *imageSharedPtr;
+                Image &image = *imageSharedPtr;
 
                 while (running)
                 {
                     idleStrategy.idle(image.poll(ping_handler, settings.fragmentCountLimit));
+                }
+            });
+
+        aeron::util::OnScopeExit tidy(
+            [&]()
+            {
+                running = false;
+
+                if (nullptr != pongThread && pongThread->joinable())
+                {
+                    pongThread->join();
+                    pongThread = nullptr;
                 }
             });
 
@@ -290,18 +294,21 @@ int main(int argc, char **argv)
             const steady_clock::time_point start = steady_clock::now();
 
             std::cout << "Warming up the media driver with "
-                << toStringWithCommas(warmupSettings.numberOfWarmupMessages) << " messages of length "
-                << toStringWithCommas(warmupSettings.messageLength) << std::endl;
+                      << toStringWithCommas(warmupSettings.numberOfWarmupMessages) << " messages of length "
+                      << toStringWithCommas(warmupSettings.messageLength) << std::endl;
 
             sendPingAndReceivePong(
-                [](AtomicBuffer&, index_t, index_t, Header&){}, *pingPublication, *pongSubscription, warmupSettings);
+                [](AtomicBuffer &, index_t, index_t, Header &){},
+                *pingPublication,
+                *pongSubscription,
+                warmupSettings);
 
             std::int64_t nanoDuration = duration<std::int64_t, std::nano>(steady_clock::now() - start).count();
 
             std::cout << "Warmed up the media driver in " << nanoDuration << " [ns]" << std::endl;
         }
 
-        hdr_histogram* histogram;
+        hdr_histogram *histogram;
         hdr_init(1, 10 * 1000 * 1000 * 1000LL, 3, &histogram);
 
         do
@@ -309,20 +316,20 @@ int main(int argc, char **argv)
             hdr_reset(histogram);
 
             FragmentAssembler fragmentAssembler(
-                [&](const AtomicBuffer& buffer, index_t offset, index_t length, const Header& header)
+                [&](const AtomicBuffer &buffer, index_t offset, index_t length, const Header &header)
                 {
                     steady_clock::time_point end = steady_clock::now();
                     steady_clock::time_point start;
 
-                    buffer.getBytes(offset, (std::uint8_t*)&start, sizeof(steady_clock::time_point));
+                    buffer.getBytes(offset, (std::uint8_t *)&start, sizeof(steady_clock::time_point));
                     std::int64_t nanoRtt = duration<std::int64_t, std::nano>(end - start).count();
 
                     hdr_record_value(histogram, nanoRtt);
                 });
 
             std::cout << "Pinging "
-                << toStringWithCommas(settings.numberOfMessages) << " messages of length "
-                << toStringWithCommas(settings.messageLength) << " bytes" << std::endl;
+                      << toStringWithCommas(settings.numberOfMessages) << " messages of length "
+                      << toStringWithCommas(settings.messageLength) << " bytes" << std::endl;
 
             steady_clock::time_point startRun = steady_clock::now();
             sendPingAndReceivePong(fragmentAssembler.handler(), *pingPublication, *pongSubscription, settings);
@@ -333,27 +340,23 @@ int main(int argc, char **argv)
 
             double runDuration = duration<double>(endRun - startRun).count();
             std::cout << "Throughput of "
-                << toStringWithCommas(settings.numberOfMessages / runDuration)
-                << " RTTs/sec" << std::endl;
+                      << toStringWithCommas((double)settings.numberOfMessages / runDuration)
+                      << " RTTs/sec" << std::endl;
         }
         while (running && continuationBarrier("Execute again?"));
-
-        running = false;
-
-        pongThread.join();
     }
-    catch (const CommandOptionException& e)
+    catch (const CommandOptionException &e)
     {
         std::cerr << "ERROR: " << e.what() << std::endl << std::endl;
         cp.displayOptionsHelp(std::cerr);
         return -1;
     }
-    catch (const SourcedException& e)
+    catch (const SourcedException &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << e.where() << std::endl;
         return -1;
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << std::endl;
         return -1;

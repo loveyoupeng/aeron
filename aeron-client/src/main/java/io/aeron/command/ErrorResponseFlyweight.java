@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -46,11 +46,20 @@ public class ErrorResponseFlyweight
     private int offset;
 
     /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public ErrorResponseFlyweight()
+    {
+    }
+
+    /**
      * Wrap the buffer at a given offset for updates.
      *
-     * @param buffer to wrap
+     * @param buffer to wrap.
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
     public final ErrorResponseFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
@@ -73,8 +82,8 @@ public class ErrorResponseFlyweight
     /**
      * Set correlation ID of the offending command.
      *
-     * @param correlationId of the offending command
-     * @return flyweight
+     * @param correlationId of the offending command.
+     * @return this for a fluent API.
      */
     public ErrorResponseFlyweight offendingCommandCorrelationId(final long correlationId)
     {
@@ -85,7 +94,7 @@ public class ErrorResponseFlyweight
     /**
      * Error code for the command.
      *
-     * @return error code for the command
+     * @return error code for the command.
      */
     public ErrorCode errorCode()
     {
@@ -95,7 +104,7 @@ public class ErrorResponseFlyweight
     /**
      * Error code value for the command.
      *
-     * @return error code value for the command
+     * @return error code value for the command.
      */
     public int errorCodeValue()
     {
@@ -105,8 +114,8 @@ public class ErrorResponseFlyweight
     /**
      * Set the error code for the command.
      *
-     * @param code for the error
-     * @return flyweight
+     * @param code for the error.
+     * @return this for a fluent API.
      */
     public ErrorResponseFlyweight errorCode(final ErrorCode code)
     {
@@ -121,28 +130,39 @@ public class ErrorResponseFlyweight
      */
     public String errorMessage()
     {
-        return buffer.getStringUtf8(offset + ERROR_MESSAGE_OFFSET);
+        return buffer.getStringAscii(offset + ERROR_MESSAGE_OFFSET);
     }
 
     /**
-     * Set the error message
+     * Append the error message to an appendable without allocation.
      *
-     * @param message to associate with the error
-     * @return flyweight
+     * @param appendable to append error message to.
+     * @return number bytes copied.
+     */
+    public int appendMessage(final Appendable appendable)
+    {
+        return buffer.getStringAscii(offset + ERROR_MESSAGE_OFFSET, appendable);
+    }
+
+    /**
+     * Set the error message.
+     *
+     * @param message to associate with the error.
+     * @return this for a fluent API.
      */
     public ErrorResponseFlyweight errorMessage(final String message)
     {
-        buffer.putStringUtf8(offset + ERROR_MESSAGE_OFFSET, message);
+        buffer.putStringAscii(offset + ERROR_MESSAGE_OFFSET, message);
         return this;
     }
 
     /**
      * Length of the error response in bytes.
      *
-     * @return length of the error response
+     * @return length of the error response in bytes.
      */
     public int length()
     {
-        return buffer.getInt(offset + ERROR_MESSAGE_OFFSET) + ERROR_MESSAGE_OFFSET + BitUtil.SIZE_OF_INT;
+        return ERROR_MESSAGE_OFFSET + BitUtil.SIZE_OF_INT + buffer.getInt(offset + ERROR_MESSAGE_OFFSET);
     }
 }

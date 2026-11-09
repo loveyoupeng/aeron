@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,6 +24,9 @@ import org.agrona.DirectBuffer;
 @FunctionalInterface
 public interface ControlledFragmentHandler
 {
+    /**
+     * Action to be taken on return from {@link #onFragment(DirectBuffer, int, int, Header)}.
+     */
     enum Action
     {
         /**
@@ -45,7 +48,7 @@ public interface ControlledFragmentHandler
 
         /**
          * Continue processing until fragment limit or no fragments with position commit at end of poll as the in
-         * {@link FragmentHandler#onFragment(DirectBuffer, int, int, Header)}.
+         * {@link #onFragment(DirectBuffer, int, int, Header)}.
          */
         CONTINUE,
     }
@@ -59,7 +62,7 @@ public interface ControlledFragmentHandler
      * @param buffer containing the data.
      * @param offset at which the data begins.
      * @param length of the data in bytes.
-     * @param header representing the meta data for the data.
+     * @param header representing the metadata for the data.
      * @return The action to be taken with regard to the stream position after the callback.
      */
     Action onFragment(DirectBuffer buffer, int offset, int length, Header header);

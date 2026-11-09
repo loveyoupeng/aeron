@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package io.aeron.archive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.status.AtomicCounter;
 
@@ -42,19 +43,17 @@ public class ArchivingMediaDriver implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        final ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
-        final MediaDriver.Context ctx = new MediaDriver.Context();
-
-        ctx.terminationHook(barrier::signal);
-
-        try (ArchivingMediaDriver ignore = launch(ctx, new Archive.Context()))
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ArchivingMediaDriver ignore = launch(
+                new MediaDriver.Context().terminationHook(barrier::signalAll),
+                new Archive.Context()))
         {
             barrier.await();
-
             System.out.println("Shutdown Archive...");
         }
     }
@@ -86,12 +85,15 @@ public class ArchivingMediaDriver implements AutoCloseable
             driver = MediaDriver.launch(driverCtx);
 
             final int errorCounterId = SystemCounterDescriptor.ERRORS.id();
-            final AtomicCounter errorCounter = null == archiveCtx.errorCounter() ?
-                new AtomicCounter(driverCtx.countersValuesBuffer(), errorCounterId) : archiveCtx.errorCounter();
+            final AtomicCounter errorCounter = null != archiveCtx.errorCounter() ?
+                archiveCtx.errorCounter() : new AtomicCounter(driverCtx.countersValuesBuffer(), errorCounterId);
+            final ErrorHandler errorHandler = null != archiveCtx.errorHandler() ?
+                archiveCtx.errorHandler() : driverCtx.errorHandler();
 
             archive = Archive.launch(archiveCtx
                 .mediaDriverAgentInvoker(driver.sharedAgentInvoker())
-                .errorHandler(driverCtx.errorHandler())
+                .aeronDirectoryName(driverCtx.aeronDirectoryName())
+                .errorHandler(errorHandler)
                 .errorCounter(errorCounter));
 
             return new ArchivingMediaDriver(driver, archive);
@@ -123,9 +125,12 @@ public class ArchivingMediaDriver implements AutoCloseable
         return driver;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
-        CloseHelper.close(archive);
-        CloseHelper.close(driver);
+        CloseHelper.closeAll(archive, driver);
     }
 }

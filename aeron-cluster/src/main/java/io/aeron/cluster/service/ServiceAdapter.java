@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,27 @@
  */
 package io.aeron.cluster.service;
 
+import io.aeron.FragmentAssembler;
 import io.aeron.Subscription;
 import io.aeron.cluster.client.ClusterException;
-import io.aeron.cluster.codecs.ElectionStartEventDecoder;
-import io.aeron.cluster.codecs.JoinLogDecoder;
-import io.aeron.cluster.codecs.MessageHeaderDecoder;
-import io.aeron.cluster.codecs.ServiceTerminationPositionDecoder;
-import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.Header;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 
-final class ServiceAdapter implements FragmentHandler, AutoCloseable
+final class ServiceAdapter implements AutoCloseable
 {
+    private static final int FRAGMENT_LIMIT = 1;
+
     private final Subscription subscription;
     private final ClusteredServiceAgent clusteredServiceAgent;
+    private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this::onFragment);
 
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final JoinLogDecoder joinLogDecoder = new JoinLogDecoder();
+    private final RequestServiceAckDecoder requestServiceAckDecoder = new RequestServiceAckDecoder();
     private final ServiceTerminationPositionDecoder serviceTerminationPositionDecoder =
         new ServiceTerminationPositionDecoder();
-    private final ElectionStartEventDecoder electionStartEventDecoder = new ElectionStartEventDecoder();
 
     ServiceAdapter(final Subscription subscription, final ClusteredServiceAgent clusteredServiceAgent)
     {
@@ -48,12 +48,12 @@ final class ServiceAdapter implements FragmentHandler, AutoCloseable
         CloseHelper.close(subscription);
     }
 
-    public int poll()
+    int poll()
     {
-        return subscription.poll(this, 1);
+        return subscription.poll(fragmentAssembler, FRAGMENT_LIMIT);
     }
 
-    public void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    private void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
@@ -63,8 +63,7 @@ final class ServiceAdapter implements FragmentHandler, AutoCloseable
             throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
-        switch (templateId)
+        switch (messageHeaderDecoder.templateId())
         {
             case JoinLogDecoder.TEMPLATE_ID:
                 joinLogDecoder.wrap(
@@ -74,12 +73,14 @@ final class ServiceAdapter implements FragmentHandler, AutoCloseable
                     messageHeaderDecoder.version());
 
                 clusteredServiceAgent.onJoinLog(
-                    joinLogDecoder.leadershipTermId(),
                     joinLogDecoder.logPosition(),
                     joinLogDecoder.maxLogPosition(),
                     joinLogDecoder.memberId(),
                     joinLogDecoder.logSessionId(),
                     joinLogDecoder.logStreamId(),
+                    joinLogDecoder.isStartup() == BooleanType.TRUE,
+                    Cluster.Role.get(joinLogDecoder.role()),
+                    joinLogDecoder.isStandby() == BooleanType.TRUE,
                     joinLogDecoder.logChannel());
                 break;
 
@@ -90,17 +91,19 @@ final class ServiceAdapter implements FragmentHandler, AutoCloseable
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
-                clusteredServiceAgent.onServiceTerminationPosition(serviceTerminationPositionDecoder.logPosition());
+                clusteredServiceAgent.onServiceTerminationPosition(
+                    serviceTerminationPositionDecoder.logPosition(),
+                    BooleanType.TRUE == serviceTerminationPositionDecoder.ackRequired());
                 break;
 
-            case ElectionStartEventDecoder.TEMPLATE_ID:
-                electionStartEventDecoder.wrap(
+            case RequestServiceAckDecoder.TEMPLATE_ID:
+                requestServiceAckDecoder.wrap(
                     buffer,
                     offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
-                clusteredServiceAgent.onElectionStartEvent(electionStartEventDecoder.logPosition());
+                clusteredServiceAgent.onRequestServiceAck(requestServiceAckDecoder.logPosition());
                 break;
         }
     }

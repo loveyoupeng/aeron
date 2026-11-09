@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,11 @@
  */
 package io.aeron.archive;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.ChannelUriStringBuilder;
+import io.aeron.CommonContext;
+import io.aeron.Publication;
+import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.driver.MediaDriver;
@@ -24,30 +28,41 @@ import io.aeron.security.Authenticator;
 import io.aeron.security.AuthenticatorSupplier;
 import io.aeron.security.CredentialsSupplier;
 import io.aeron.security.SessionProxy;
+import io.aeron.test.EventLogExtension;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.TestContexts;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.SystemUtil;
 import org.agrona.collections.MutableLong;
 import org.agrona.concurrent.status.CountersReader;
-import org.junit.After;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 
-import static io.aeron.archive.Common.*;
+import static io.aeron.archive.ArchiveSystemTests.CATALOG_CAPACITY;
+import static io.aeron.archive.ArchiveSystemTests.consume;
+import static io.aeron.archive.ArchiveSystemTests.offer;
 import static io.aeron.archive.codecs.SourceLocation.LOCAL;
 import static io.aeron.security.NullCredentialsSupplier.NULL_CREDENTIAL;
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.spy;
 
-public class ArchiveAuthenticationTest
+@ExtendWith({ EventLogExtension.class, InterruptingTestCallback.class })
+class ArchiveAuthenticationTest
 {
-    private static final int RECORDED_STREAM_ID = 33;
+    private static final int RECORDED_STREAM_ID = 1033;
     private static final String RECORDED_CHANNEL = new ChannelUriStringBuilder()
         .media("udp")
         .endpoint("localhost:3333")
-        .termLength(Common.TERM_LENGTH)
+        .termLength(ArchiveSystemTests.TERM_LENGTH)
         .build();
 
     private static final String CREDENTIALS_STRING = "username=\"admin\"|password=\"secret\"";
@@ -57,24 +72,25 @@ public class ArchiveAuthenticationTest
     private final byte[] encodedCredentials = CREDENTIALS_STRING.getBytes();
     private final byte[] encodedChallenge = CHALLENGE_STRING.getBytes();
 
-    private ArchivingMediaDriver archivingMediaDriver;
+    private TestMediaDriver driver;
+    private Archive archive;
     private Aeron aeron;
     private AeronArchive aeronArchive;
 
     private final String aeronDirectoryName = CommonContext.generateRandomDirName();
 
-    @After
-    public void after()
-    {
-        CloseHelper.close(aeronArchive);
-        CloseHelper.close(aeron);
-        CloseHelper.close(archivingMediaDriver);
+    @RegisterExtension
+    final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
 
-        archivingMediaDriver.archive().context().deleteArchiveDirectory();
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeronArchive, aeron, archive, driver);
     }
 
-    @Test(timeout = 10_000)
-    public void shouldBeAbleToRecordWithDefaultCredentialsAndAuthenticator()
+    @Test
+    @InterruptAfter(10)
+    void shouldBeAbleToRecordWithDefaultCredentialsAndAuthenticator()
     {
         launchArchivingMediaDriver(null);
         connectClient(null);
@@ -82,8 +98,9 @@ public class ArchiveAuthenticationTest
         createRecording();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldBeAbleToRecordWithAuthenticateOnConnectRequestWithCredentials()
+    @Test
+    @InterruptAfter(10)
+    void shouldBeAbleToRecordWithAuthenticateOnConnectRequestWithCredentials()
     {
         final MutableLong authenticatorSessionId = new MutableLong(-1L);
 
@@ -106,7 +123,7 @@ public class ArchiveAuthenticationTest
             public void onConnectRequest(final long sessionId, final byte[] encodedCredentials, final long nowMs)
             {
                 authenticatorSessionId.value = sessionId;
-                assertThat(new String(encodedCredentials), is(CREDENTIALS_STRING));
+                assertEquals(CREDENTIALS_STRING, new String(encodedCredentials));
             }
 
             public void onChallengeResponse(final long sessionId, final byte[] encodedCredentials, final long nowMs)
@@ -116,7 +133,7 @@ public class ArchiveAuthenticationTest
 
             public void onConnectedSession(final SessionProxy sessionProxy, final long nowMs)
             {
-                assertThat(authenticatorSessionId.value, is(sessionProxy.sessionId()));
+                assertEquals(sessionProxy.sessionId(), authenticatorSessionId.value);
                 sessionProxy.authenticate(PRINCIPAL_STRING.getBytes());
             }
 
@@ -129,13 +146,14 @@ public class ArchiveAuthenticationTest
         launchArchivingMediaDriver(() -> authenticator);
         connectClient(credentialsSupplier);
 
-        assertThat(authenticatorSessionId.value, is(aeronArchive.controlSessionId()));
+        assertEquals(aeronArchive.controlSessionId(), authenticatorSessionId.value);
 
         createRecording();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldBeAbleToRecordWithAuthenticateOnChallengeResponse()
+    @Test
+    @InterruptAfter(10)
+    void shouldBeAbleToRecordWithAuthenticateOnChallengeResponse()
     {
         final MutableLong authenticatorSessionId = new MutableLong(-1L);
 
@@ -148,7 +166,7 @@ public class ArchiveAuthenticationTest
 
             public byte[] onChallenge(final byte[] encodedChallenge)
             {
-                assertThat(new String(encodedChallenge), is(CHALLENGE_STRING));
+                assertEquals(CHALLENGE_STRING, new String(encodedChallenge));
                 return encodedCredentials;
             }
         });
@@ -160,19 +178,19 @@ public class ArchiveAuthenticationTest
             public void onConnectRequest(final long sessionId, final byte[] encodedCredentials, final long nowMs)
             {
                 authenticatorSessionId.value = sessionId;
-                assertThat(encodedCredentials.length, is(0));
+                assertEquals(0, encodedCredentials.length);
             }
 
             public void onChallengeResponse(final long sessionId, final byte[] encodedCredentials, final long nowMs)
             {
-                assertThat(authenticatorSessionId.value, is(sessionId));
-                assertThat(new String(encodedCredentials), is(CREDENTIALS_STRING));
+                assertEquals(sessionId, authenticatorSessionId.value);
+                assertEquals(CREDENTIALS_STRING, new String(encodedCredentials));
                 challengeSuccessful = true;
             }
 
             public void onConnectedSession(final SessionProxy sessionProxy, final long nowMs)
             {
-                assertThat(authenticatorSessionId.value, is(sessionProxy.sessionId()));
+                assertEquals(sessionProxy.sessionId(), authenticatorSessionId.value);
                 sessionProxy.challenge(encodedChallenge);
             }
 
@@ -180,7 +198,7 @@ public class ArchiveAuthenticationTest
             {
                 if (challengeSuccessful)
                 {
-                    assertThat(authenticatorSessionId.value, is(sessionProxy.sessionId()));
+                    assertEquals(sessionProxy.sessionId(), authenticatorSessionId.value);
                     sessionProxy.authenticate(PRINCIPAL_STRING.getBytes());
                 }
             }
@@ -189,13 +207,14 @@ public class ArchiveAuthenticationTest
         launchArchivingMediaDriver(() -> authenticator);
         connectClient(credentialsSupplier);
 
-        assertThat(authenticatorSessionId.value, is(aeronArchive.controlSessionId()));
+        assertEquals(aeronArchive.controlSessionId(), authenticatorSessionId.value);
 
         createRecording();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldNotBeAbleToConnectWithRejectOnConnectRequest()
+    @Test
+    @InterruptAfter(10)
+    void shouldNotBeAbleToConnectWithRejectOnConnectRequest()
     {
         final MutableLong authenticatorSessionId = new MutableLong(-1L);
 
@@ -208,7 +227,7 @@ public class ArchiveAuthenticationTest
 
             public byte[] onChallenge(final byte[] encodedChallenge)
             {
-                assertThat(new String(encodedChallenge), is(CHALLENGE_STRING));
+                assertEquals(CHALLENGE_STRING, new String(encodedChallenge));
                 return encodedCredentials;
             }
         });
@@ -218,7 +237,7 @@ public class ArchiveAuthenticationTest
             public void onConnectRequest(final long sessionId, final byte[] encodedCredentials, final long nowMs)
             {
                 authenticatorSessionId.value = sessionId;
-                assertThat(encodedCredentials.length, is(0));
+                assertEquals(0, encodedCredentials.length);
             }
 
             public void onChallengeResponse(final long sessionId, final byte[] encodedCredentials, final long nowMs)
@@ -228,7 +247,7 @@ public class ArchiveAuthenticationTest
 
             public void onConnectedSession(final SessionProxy sessionProxy, final long nowMs)
             {
-                assertThat(authenticatorSessionId.value, is(sessionProxy.sessionId()));
+                assertEquals(sessionProxy.sessionId(), authenticatorSessionId.value);
                 sessionProxy.reject();
             }
 
@@ -246,15 +265,16 @@ public class ArchiveAuthenticationTest
         }
         catch (final ArchiveException ex)
         {
-            assertThat(ex.errorCode(), is(ArchiveException.AUTHENTICATION_REJECTED));
+            assertEquals(ArchiveException.AUTHENTICATION_REJECTED, ex.errorCode());
             return;
         }
 
         fail("should have seen exception");
     }
 
-    @Test(timeout = 10_000)
-    public void shouldNotBeAbleToConnectWithRejectOnChallengeResponse()
+    @Test
+    @InterruptAfter(10)
+    void shouldNotBeAbleToConnectWithRejectOnChallengeResponse()
     {
         final MutableLong authenticatorSessionId = new MutableLong(-1L);
 
@@ -267,7 +287,7 @@ public class ArchiveAuthenticationTest
 
             public byte[] onChallenge(final byte[] encodedChallenge)
             {
-                assertThat(new String(encodedChallenge), is(CHALLENGE_STRING));
+                assertEquals(CHALLENGE_STRING, new String(encodedChallenge));
                 return encodedCredentials;
             }
         });
@@ -279,19 +299,19 @@ public class ArchiveAuthenticationTest
             public void onConnectRequest(final long sessionId, final byte[] encodedCredentials, final long nowMs)
             {
                 authenticatorSessionId.value = sessionId;
-                assertThat(encodedCredentials.length, is(0));
+                assertEquals(0, encodedCredentials.length);
             }
 
             public void onChallengeResponse(final long sessionId, final byte[] encodedCredentials, final long nowMs)
             {
-                assertThat(authenticatorSessionId.value, is(sessionId));
-                assertThat(new String(encodedCredentials), is(CREDENTIALS_STRING));
+                assertEquals(sessionId, authenticatorSessionId.value);
+                assertEquals(CREDENTIALS_STRING, new String(encodedCredentials));
                 challengeRespondedTo = true;
             }
 
             public void onConnectedSession(final SessionProxy sessionProxy, final long nowMs)
             {
-                assertThat(authenticatorSessionId.value, is(sessionProxy.sessionId()));
+                assertEquals(sessionProxy.sessionId(), authenticatorSessionId.value);
                 sessionProxy.challenge(encodedChallenge);
             }
 
@@ -299,7 +319,7 @@ public class ArchiveAuthenticationTest
             {
                 if (challengeRespondedTo)
                 {
-                    assertThat(authenticatorSessionId.value, is(sessionProxy.sessionId()));
+                    assertEquals(sessionProxy.sessionId(), authenticatorSessionId.value);
                     sessionProxy.reject();
                 }
             }
@@ -313,7 +333,7 @@ public class ArchiveAuthenticationTest
         }
         catch (final ArchiveException ex)
         {
-            assertThat(ex.errorCode(), is(ArchiveException.AUTHENTICATION_REJECTED));
+            assertEquals(ArchiveException.AUTHENTICATION_REJECTED, ex.errorCode());
             return;
         }
 
@@ -327,30 +347,34 @@ public class ArchiveAuthenticationTest
                 .aeronDirectoryName(aeronDirectoryName));
 
         aeronArchive = AeronArchive.connect(
-            new AeronArchive.Context()
+            TestContexts.localhostAeronArchive()
                 .credentialsSupplier(credentialsSupplier)
                 .aeron(aeron));
     }
 
     private void launchArchivingMediaDriver(final AuthenticatorSupplier authenticatorSupplier)
     {
-        archivingMediaDriver = ArchivingMediaDriver.launch(
-            new MediaDriver.Context()
-                .aeronDirectoryName(aeronDirectoryName)
-                .termBufferSparseFile(true)
-                .threadingMode(ThreadingMode.SHARED)
-                .errorHandler(Throwable::printStackTrace)
-                .spiesSimulateConnection(false)
-                .dirDeleteOnShutdown(true)
-                .dirDeleteOnStart(true),
-            new Archive.Context()
-                .maxCatalogEntries(Common.MAX_CATALOG_ENTRIES)
-                .aeronDirectoryName(aeronDirectoryName)
-                .deleteArchiveOnStart(true)
-                .archiveDir(new File(SystemUtil.tmpDirName(), "archive"))
-                .fileSyncLevel(0)
-                .authenticatorSupplier(authenticatorSupplier)
-                .threadingMode(ArchiveThreadingMode.SHARED));
+        final MediaDriver.Context mediaDriverCtx = new MediaDriver.Context()
+            .aeronDirectoryName(aeronDirectoryName)
+            .termBufferSparseFile(true)
+            .threadingMode(ThreadingMode.SHARED)
+            .spiesSimulateConnection(false)
+            .dirDeleteOnStart(true)
+            .dirDeleteOnShutdown(true);
+
+        final Archive.Context archiveCtx = TestContexts.localhostArchive()
+            .catalogCapacity(CATALOG_CAPACITY)
+            .aeronDirectoryName(aeronDirectoryName)
+            .deleteArchiveOnStart(true)
+            .archiveDir(new File(SystemUtil.tmpDirName(), "archive"))
+            .fileSyncLevel(0)
+            .authenticatorSupplier(authenticatorSupplier)
+            .threadingMode(ArchiveThreadingMode.SHARED);
+
+        driver = TestMediaDriver.launch(mediaDriverCtx, systemTestWatcher);
+        systemTestWatcher.dataCollector().add(mediaDriverCtx.aeronDirectory());
+        archive = Archive.launch(archiveCtx);
+        systemTestWatcher.dataCollector().add(archiveCtx.archiveDir());
     }
 
     private void createRecording()
@@ -364,13 +388,14 @@ public class ArchiveAuthenticationTest
             Publication publication = aeron.addPublication(RECORDED_CHANNEL, RECORDED_STREAM_ID))
         {
             final CountersReader counters = aeron.countersReader();
-            final int counterId = Common.awaitRecordingCounterId(counters, publication.sessionId());
+            final int counterId = Tests.awaitRecordingCounterId(
+                counters, publication.sessionId(), aeronArchive.archiveId());
 
             offer(publication, messageCount, messagePrefix);
             consume(subscription, messageCount, messagePrefix);
 
             final long currentPosition = publication.position();
-            awaitPosition(counters, counterId, currentPosition);
+            Tests.awaitPosition(counters, counterId, currentPosition);
         }
 
         aeronArchive.stopRecording(subscriptionId);

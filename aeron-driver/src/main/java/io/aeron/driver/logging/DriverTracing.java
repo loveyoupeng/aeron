@@ -1,0 +1,691 @@
+/*
+ * Copyright 2014-2026 Real Logic Limited.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.aeron.driver.logging;
+
+import io.aeron.driver.media.ImageConnection;
+import io.aeron.logging.EventConfiguration;
+import org.agrona.DirectBuffer;
+import org.agrona.collections.Object2ObjectHashMap;
+
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.Set;
+
+import static io.aeron.driver.logging.DriverEventCode.*;
+import static io.aeron.command.ControlProtocolEvents.*;
+import static io.aeron.driver.logging.DriverTracer.TRACER;
+
+/**
+ * Direct-call entry points for logging {@link io.aeron.driver.MediaDriver} events, replacing the previous
+ * ByteBuddy-based instrumentation.
+ */
+public final class DriverTracing
+{
+    private static final Object2ObjectHashMap<String, EnumSet<DriverEventCode>> SPECIAL_EVENTS =
+        new Object2ObjectHashMap<>();
+
+    private static final Set<DriverEventCode> ENABLED_EVENT_CODES;
+
+    static
+    {
+        SPECIAL_EVENTS.put("all", EnumSet.allOf(DriverEventCode.class));
+        SPECIAL_EVENTS.put("admin", EnumSet.complementOf(EnumSet.of(FRAME_IN, FRAME_OUT)));
+
+        final String enabledEventCodes = System.getProperty("aeron.event.log");
+        final String disabledEventCodes = System.getProperty("aeron.event.log.disable");
+
+        final EnumSet<DriverEventCode> disabledEventCodeSet = EventConfiguration.parseEventCodes(
+            DriverEventCode.class,
+            disabledEventCodes,
+            SPECIAL_EVENTS,
+            DriverEventCode::get,
+            DriverEventCode::get);
+
+        final EnumSet<DriverEventCode> enabledEventCodeSet = EventConfiguration.parseEventCodes(
+            DriverEventCode.class,
+            enabledEventCodes,
+            SPECIAL_EVENTS,
+            DriverEventCode::get,
+            DriverEventCode::get);
+
+        enabledEventCodeSet.removeAll(disabledEventCodeSet);
+
+        ENABLED_EVENT_CODES = Collections.unmodifiableSet(enabledEventCodeSet);
+    }
+
+    private static final boolean TRACE_FRAME_IN_ENABLED = isEnabled(FRAME_IN);
+    private static final boolean TRACE_FRAME_OUT_ENABLED = isEnabled(FRAME_OUT);
+    private static final boolean TRACE_REMOVE_PUBLICATION_CLEANUP_ENABLED = isEnabled(REMOVE_PUBLICATION_CLEANUP);
+    private static final boolean TRACE_REMOVE_SUBSCRIPTION_CLEANUP_ENABLED = isEnabled(REMOVE_SUBSCRIPTION_CLEANUP);
+    private static final boolean TRACE_REMOVE_IMAGE_CLEANUP_ENABLED = isEnabled(REMOVE_IMAGE_CLEANUP);
+    private static final boolean TRACE_SEND_CHANNEL_CREATION_ENABLED = isEnabled(SEND_CHANNEL_CREATION);
+    private static final boolean TRACE_SEND_CHANNEL_CLOSE_ENABLED = isEnabled(SEND_CHANNEL_CLOSE);
+    private static final boolean TRACE_RECEIVE_CHANNEL_CREATION_ENABLED = isEnabled(RECEIVE_CHANNEL_CREATION);
+    private static final boolean TRACE_RECEIVE_CHANNEL_CLOSE_ENABLED = isEnabled(RECEIVE_CHANNEL_CLOSE);
+    private static final boolean TRACE_UNTETHERED_SUBSCRIPTION_STATE_CHANGE_ENABLED =
+        isEnabled(UNTETHERED_SUBSCRIPTION_STATE_CHANGE);
+    private static final boolean TRACE_NAME_RESOLUTION_NEIGHBOR_ADDED_ENABLED =
+        isEnabled(NAME_RESOLUTION_NEIGHBOR_ADDED);
+    private static final boolean TRACE_NAME_RESOLUTION_NEIGHBOR_REMOVED_ENABLED =
+        isEnabled(NAME_RESOLUTION_NEIGHBOR_REMOVED);
+    private static final boolean TRACE_NAME_RESOLUTION_RESOLVE_ENABLED = isEnabled(NAME_RESOLUTION_RESOLVE);
+    private static final boolean TRACE_NAME_RESOLUTION_LOOKUP_ENABLED = isEnabled(NAME_RESOLUTION_LOOKUP);
+    private static final boolean TRACE_NAME_RESOLUTION_HOST_NAME_ENABLED = isEnabled(NAME_RESOLUTION_HOST_NAME);
+    private static final boolean TRACE_FLOW_CONTROL_RECEIVER_ADDED_ENABLED = isEnabled(FLOW_CONTROL_RECEIVER_ADDED);
+    private static final boolean TRACE_FLOW_CONTROL_RECEIVER_REMOVED_ENABLED =
+        isEnabled(FLOW_CONTROL_RECEIVER_REMOVED);
+    private static final boolean TRACE_NAK_SENT_ENABLED = isEnabled(NAK_SENT);
+    private static final boolean TRACE_NAK_RECEIVED_ENABLED = isEnabled(NAK_RECEIVED);
+    private static final boolean TRACE_RESEND_ENABLED = isEnabled(RESEND);
+    private static final boolean TRACE_PUBLICATION_REVOKE_ENABLED = isEnabled(PUBLICATION_REVOKE);
+    private static final boolean TRACE_PUBLICATION_IMAGE_REVOKE_ENABLED = isEnabled(PUBLICATION_IMAGE_REVOKE);
+    private static final boolean TRACE_TEXT_DATA_ENABLED = isEnabled(TEXT_DATA);
+    private static final boolean TRACE_DRIVER_START = !ENABLED_EVENT_CODES.isEmpty();
+
+    private DriverTracing()
+    {
+    }
+
+    /**
+     * Determine if a given event code is configured/enabled for logging.
+     *
+     * @param driverEventCode to check for enablement.
+     * @return <code>true</code> if enabled, <code>false</code> otherwise.
+     */
+    private static boolean isEnabled(final DriverEventCode driverEventCode)
+    {
+        return null != driverEventCode && ENABLED_EVENT_CODES.contains(driverEventCode);
+    }
+
+    /**
+     * Log a frame coming in from the media.
+     *
+     * @param srcAddress  for the frame.
+     * @param buffer      containing the frame.
+     * @param offset      in the buffer at which the frame begins.
+     * @param frameLength of the frame.
+     */
+    public static void traceFrameIn(
+        final InetSocketAddress srcAddress,
+        final DirectBuffer buffer,
+        final int offset,
+        final int frameLength)
+    {
+        if (!TRACE_FRAME_IN_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceFrameIn(srcAddress.getAddress(), srcAddress.getPort(), buffer, offset, frameLength);
+    }
+
+    /**
+     * Log a frame being sent out from the driver to the media.
+     *
+     * @param buffer     containing the frame.
+     * @param dstAddress for the frame.
+     */
+    public static void traceFrameOut(final ByteBuffer buffer, final InetSocketAddress dstAddress)
+    {
+        if (!TRACE_FRAME_OUT_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceFrameOut(dstAddress.getAddress(), dstAddress.getPort(), buffer);
+    }
+
+    /**
+     * Log the removal of a publication.
+     *
+     * @param channel   for the channel.
+     * @param sessionId for the publication.
+     * @param streamId  within the channel.
+     */
+    public static void tracePublicationRemoval(final String channel, final int sessionId, final int streamId)
+    {
+        if (!TRACE_REMOVE_PUBLICATION_CLEANUP_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.tracePublicationRemoval(channel, sessionId, streamId);
+    }
+
+    /**
+     * Log the removal of a subscription.
+     *
+     * @param channel        for the channel.
+     * @param streamId       within the channel.
+     * @param subscriptionId for the subscription.
+     */
+    public static void traceSubscriptionRemoval(final String channel, final int streamId, final long subscriptionId)
+    {
+        if (!TRACE_REMOVE_SUBSCRIPTION_CLEANUP_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceSubscriptionRemoval(channel, streamId, subscriptionId);
+    }
+
+    /**
+     * Log the removal of an image from the driver.
+     *
+     * @param channel       for the channel.
+     * @param sessionId     for the image.
+     * @param streamId      for the image.
+     * @param correlationId for the image.
+     */
+    public static void traceImageRemoval(
+        final String channel, final int sessionId, final int streamId, final long correlationId)
+    {
+        if (!TRACE_REMOVE_IMAGE_CLEANUP_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceImageRemoval(channel, sessionId, streamId, correlationId);
+    }
+
+    /**
+     * Log the creation of a send channel endpoint.
+     *
+     * @param description of the channel.
+     */
+    public static void traceSendChannelCreation(final String description)
+    {
+        if (!TRACE_SEND_CHANNEL_CREATION_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceSendChannelCreation(description);
+    }
+
+    /**
+     * Log the closing of a send channel endpoint.
+     *
+     * @param description of the channel.
+     */
+    public static void traceSendChannelClose(final String description)
+    {
+        if (!TRACE_SEND_CHANNEL_CLOSE_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceSendChannelClose(description);
+    }
+
+    /**
+     * Log the creation of a receive channel endpoint.
+     *
+     * @param description of the channel.
+     */
+    public static void traceReceiveChannelCreation(final String description)
+    {
+        if (!TRACE_RECEIVE_CHANNEL_CREATION_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceReceiveChannelCreation(description);
+    }
+
+    /**
+     * Log the closing of a receive channel endpoint.
+     *
+     * @param description of the channel.
+     */
+    public static void traceReceiveChannelClose(final String description)
+    {
+        if (!TRACE_RECEIVE_CHANNEL_CLOSE_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceReceiveChannelClose(description);
+    }
+
+    /**
+     * Log an untethered subscription state change.
+     *
+     * @param <E>            type of the event.
+     * @param oldState       before the change.
+     * @param newState       after the change.
+     * @param subscriptionId to which the change applies.
+     * @param streamId       of the image.
+     * @param sessionId      of the image.
+     */
+    public static <E extends Enum<E>> void traceUntetheredSubscriptionStateChange(
+        final E oldState, final E newState, final long subscriptionId, final int streamId, final int sessionId)
+    {
+        if (!TRACE_UNTETHERED_SUBSCRIPTION_STATE_CHANGE_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceUntetheredSubscriptionStateChange(
+            oldState, newState, subscriptionId, streamId, sessionId);
+    }
+
+    /**
+     * Log a neighbor being added for name resolution.
+     *
+     * @param address of the neighbor.
+     */
+    public static void traceNeighborAdded(final InetSocketAddress address)
+    {
+        if (!TRACE_NAME_RESOLUTION_NEIGHBOR_ADDED_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceNeighborAdded(address.getAddress(), address.getPort());
+    }
+
+    /**
+     * Log a neighbor being removed for name resolution.
+     *
+     * @param address of the neighbor.
+     */
+    public static void traceNeighborRemoved(final InetSocketAddress address)
+    {
+        if (!TRACE_NAME_RESOLUTION_NEIGHBOR_REMOVED_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceNeighborRemoved(address.getAddress(), address.getPort());
+    }
+
+    /**
+     * Log a resolution for a resolver and the associated result.
+     *
+     * @param resolverName   simple class name of the resolver.
+     * @param durationNs     of the call in nanoseconds.
+     * @param name           host name being resolved.
+     * @param isReResolution {@code true} if this is a re-resolution or {@code false} if initial resolution.
+     * @param address        address that was resolved to, can be {@code null}.
+     */
+    public static void traceResolve(
+        final String resolverName,
+        final long durationNs,
+        final String name,
+        final boolean isReResolution,
+        final InetAddress address)
+    {
+        if (!TRACE_NAME_RESOLUTION_RESOLVE_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceResolve(resolverName, durationNs, name, isReResolution, address);
+    }
+
+    /**
+     * Log a lookup for a resolver and the associated result.
+     *
+     * @param resolverName simple class name of the resolver.
+     * @param durationNs   of the call in nanoseconds.
+     * @param name         host name being resolved.
+     * @param isReLookup   {@code true} if this is a re-lookup.
+     * @param resolvedName address that was resolved to, can be {@code null}.
+     */
+    public static void traceLookup(
+        final String resolverName,
+        final long durationNs,
+        final String name,
+        final boolean isReLookup,
+        final String resolvedName)
+    {
+        if (!TRACE_NAME_RESOLUTION_LOOKUP_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceLookup(resolverName, durationNs, name, isReLookup, resolvedName);
+    }
+
+    /**
+     * Log a host name resolution duration.
+     *
+     * @param durationNs of the call in nanoseconds.
+     * @param hostName   host name being resolved.
+     */
+    public static void traceHostName(final long durationNs, final String hostName)
+    {
+        if (!TRACE_NAME_RESOLUTION_HOST_NAME_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceHostName(durationNs, hostName);
+    }
+
+    /**
+     * Log a receiver being added to a flow control strategy.
+     *
+     * @param receiverId    of the receiver.
+     * @param sessionId     of the image.
+     * @param streamId      of the image.
+     * @param channel       uri of the channel.
+     * @param receiverCount number of the receivers after the event.
+     */
+    public static void traceFlowControlReceiverAdded(
+        final long receiverId,
+        final int sessionId,
+        final int streamId,
+        final String channel,
+        final int receiverCount)
+    {
+        if (!TRACE_FLOW_CONTROL_RECEIVER_ADDED_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceFlowControlReceiverAdded(
+            receiverId, sessionId, streamId, channel, receiverCount);
+    }
+
+    /**
+     * Log a receiver being removed from a flow control strategy.
+     *
+     * @param receiverId    of the receiver.
+     * @param sessionId     of the image.
+     * @param streamId      of the image.
+     * @param channel       uri of the channel.
+     * @param receiverCount number of the receivers after the event.
+     */
+    public static void traceFlowControlReceiverRemoved(
+        final long receiverId,
+        final int sessionId,
+        final int streamId,
+        final String channel,
+        final int receiverCount)
+    {
+        if (!TRACE_FLOW_CONTROL_RECEIVER_REMOVED_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceFlowControlReceiverRemoved(receiverId, sessionId, streamId, channel, receiverCount);
+    }
+
+    /**
+     * Log a NAK message sent by the receiver for a single control address.
+     *
+     * @param address    NAK UDP destination.
+     * @param sessionId  of the NAK.
+     * @param streamId   of the NAK.
+     * @param termId     of the NAK.
+     * @param termOffset of the NAK.
+     * @param nakLength  of the NAK.
+     * @param channel    of the NAK.
+     */
+    private static void traceNakSent(
+        final InetSocketAddress address,
+        final int sessionId,
+        final int streamId,
+        final int termId,
+        final int termOffset,
+        final int nakLength,
+        final String channel)
+    {
+        TRACER.traceNakSent(
+            address.getAddress(), address.getPort(), sessionId, streamId, termId, termOffset, nakLength, channel);
+    }
+
+    /**
+     * Log all the naks send for the connections for a single image.
+     *
+     * @param controlAddresses  NAK UDP destinations.
+     * @param sessionId         of the NAK.
+     * @param streamId          of the NAK.
+     * @param termId            of the NAK.
+     * @param termOffset        of the NAK.
+     * @param nakLength         of the NAK.
+     * @param channel           of the NAK.
+     */
+    public static void traceNaksSent(
+        final ImageConnection[] controlAddresses,
+        final int sessionId,
+        final int streamId,
+        final int termId,
+        final int termOffset,
+        final int nakLength,
+        final String channel)
+    {
+        if (!TRACE_NAK_SENT_ENABLED)
+        {
+            return;
+        }
+
+        for (final ImageConnection connection : controlAddresses)
+        {
+            if (null != connection)
+            {
+                traceNakSent(
+                    connection.controlAddress, sessionId, streamId, termId, termOffset, nakLength, channel);
+            }
+        }
+    }
+
+    /**
+     * Log a NAK message received by the sender.
+     *
+     * @param address    NAK UDP source.
+     * @param sessionId  of the NAK.
+     * @param streamId   of the NAK.
+     * @param termId     of the NAK.
+     * @param termOffset of the NAK.
+     * @param nakLength  of the NAK.
+     * @param channel    of the NAK.
+     */
+    public static void traceNakReceived(
+        final InetSocketAddress address,
+        final int sessionId,
+        final int streamId,
+        final int termId,
+        final int termOffset,
+        final int nakLength,
+        final String channel)
+    {
+        if (!TRACE_NAK_RECEIVED_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceNakReceived(
+            address.getAddress(), address.getPort(), sessionId, streamId, termId, termOffset, nakLength, channel);
+    }
+
+    /**
+     * Logs a resend of a range of a term buffer.
+     *
+     * @param sessionId    of the resend.
+     * @param streamId     of the resend.
+     * @param termId       of the resend.
+     * @param termOffset   of the resend.
+     * @param resendLength of the resend.
+     * @param channel      of the resend.
+     */
+    public static void traceResend(
+        final int sessionId,
+        final int streamId,
+        final int termId,
+        final int termOffset,
+        final int resendLength,
+        final String channel)
+    {
+        if (!TRACE_RESEND_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceResend(sessionId, streamId, termId, termOffset, resendLength, channel);
+    }
+
+    /**
+     * Logs a publication being revoked.
+     *
+     * @param revokedPos of the publication revoke.
+     * @param sessionId  of the publication revoke.
+     * @param streamId   of the publication revoke.
+     * @param channel    of the publication revoke.
+     */
+    public static void tracePublicationRevoke(
+        final long revokedPos, final int sessionId, final int streamId, final String channel)
+    {
+        if (!TRACE_PUBLICATION_REVOKE_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.tracePublicationRevoke(revokedPos, sessionId, streamId, channel);
+    }
+
+    /**
+     * Logs a publication image being revoked.
+     *
+     * @param revokedPos of the publication image revoke.
+     * @param sessionId  of the publication image revoke.
+     * @param streamId   of the publication image revoke.
+     * @param channel    of the publication image revoke.
+     */
+    public static void tracePublicationImageRevoke(
+        final long revokedPos, final int sessionId, final int streamId, final String channel)
+    {
+        if (!TRACE_PUBLICATION_IMAGE_REVOKE_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.tracePublicationImageRevoke(revokedPos, sessionId, streamId, channel);
+    }
+
+    /**
+     * Log a client command/response message keyed by its protocol message type id.
+     *
+     * @param msgTypeId of the message, from {@link io.aeron.command.ControlProtocolEvents}.
+     * @param buffer    containing the encoded message.
+     * @param index     at which the message begins.
+     * @param length    of the encoded message.
+     */
+    public static void traceCmd(final int msgTypeId, final DirectBuffer buffer, final int index, final int length)
+    {
+        final DriverEventCode code = cmdEventCode(msgTypeId);
+        if (null != code && isEnabled(code))
+        {
+            TRACER.trace(code, buffer, index, length);
+        }
+    }
+
+    /**
+     * Log a simple text input.
+     *
+     * @param text to be logged.
+     */
+    public static void traceText(final String text)
+    {
+        if (!TRACE_TEXT_DATA_ENABLED)
+        {
+            return;
+        }
+
+        TRACER.traceString(TEXT_DATA, text);
+    }
+
+    /**
+     * Log the driver start.
+     *
+     * @param version   of the driver.
+     */
+    public static void traceStart(final String version)
+    {
+        if (!TRACE_DRIVER_START)
+        {
+            return;
+        }
+
+        TRACER.traceStart(version);
+    }
+
+    private static DriverEventCode cmdEventCode(final int msgTypeId)
+    {
+        switch (msgTypeId)
+        {
+            case ADD_PUBLICATION:
+                return CMD_IN_ADD_PUBLICATION;
+            case REMOVE_PUBLICATION:
+                return CMD_IN_REMOVE_PUBLICATION;
+            case ADD_EXCLUSIVE_PUBLICATION:
+                return CMD_IN_ADD_EXCLUSIVE_PUBLICATION;
+            case ADD_SUBSCRIPTION:
+                return CMD_IN_ADD_SUBSCRIPTION;
+            case REMOVE_SUBSCRIPTION:
+                return CMD_IN_REMOVE_SUBSCRIPTION;
+            case CLIENT_KEEPALIVE:
+                return CMD_IN_KEEPALIVE_CLIENT;
+            case ADD_DESTINATION:
+                return CMD_IN_ADD_DESTINATION;
+            case REMOVE_DESTINATION:
+                return CMD_IN_REMOVE_DESTINATION;
+            case ON_AVAILABLE_IMAGE:
+                return CMD_OUT_AVAILABLE_IMAGE;
+            case ON_ERROR:
+                return CMD_OUT_ERROR;
+            case ON_OPERATION_SUCCESS:
+                return CMD_OUT_ON_OPERATION_SUCCESS;
+            case ON_PUBLICATION_READY:
+                return CMD_OUT_PUBLICATION_READY;
+            case ON_UNAVAILABLE_IMAGE:
+                return CMD_OUT_ON_UNAVAILABLE_IMAGE;
+            case ON_EXCLUSIVE_PUBLICATION_READY:
+                return CMD_OUT_EXCLUSIVE_PUBLICATION_READY;
+            case ON_SUBSCRIPTION_READY:
+                return CMD_OUT_SUBSCRIPTION_READY;
+            case ON_COUNTER_READY:
+                return CMD_OUT_COUNTER_READY;
+            case ON_UNAVAILABLE_COUNTER:
+                return CMD_OUT_ON_UNAVAILABLE_COUNTER;
+            case ADD_COUNTER:
+                return CMD_IN_ADD_COUNTER;
+            case REMOVE_COUNTER:
+                return CMD_IN_REMOVE_COUNTER;
+            case CLIENT_CLOSE:
+                return CMD_IN_CLIENT_CLOSE;
+            case ADD_RCV_DESTINATION:
+                return CMD_IN_ADD_RCV_DESTINATION;
+            case REMOVE_RCV_DESTINATION:
+                return CMD_IN_REMOVE_RCV_DESTINATION;
+            case ON_CLIENT_TIMEOUT:
+                return CMD_OUT_ON_CLIENT_TIMEOUT;
+            case TERMINATE_DRIVER:
+                return CMD_IN_TERMINATE_DRIVER;
+            case REMOVE_DESTINATION_BY_ID:
+                return CMD_IN_REMOVE_DESTINATION_BY_ID;
+            case REJECT_IMAGE:
+                return CMD_IN_REJECT_IMAGE;
+            default:
+                return null;
+        }
+    }
+}

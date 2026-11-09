@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
- * Message to denote that new buffers have been setup for a publication.
+ * Message to denote that new buffers have been created for a publication.
  *
  * @see ControlProtocolEvents
  * <pre>
@@ -63,11 +63,20 @@ public class PublicationBuffersReadyFlyweight
     private int offset;
 
     /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public PublicationBuffersReadyFlyweight()
+    {
+    }
+
+    /**
      * Wrap the buffer at a given offset for updates.
      *
-     * @param buffer to wrap
+     * @param buffer to wrap.
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
     public final PublicationBuffersReadyFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
@@ -78,9 +87,9 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Get the correlation id field
+     * Get the correlation id field.
      *
-     * @return correlation id field
+     * @return correlation id field.
      */
     public long correlationId()
     {
@@ -88,10 +97,10 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Set the correlation id field
+     * Set the correlation id field.
      *
-     * @param correlationId field value
-     * @return flyweight
+     * @param correlationId field value.
+     * @return this for a fluent API.
      */
     public PublicationBuffersReadyFlyweight correlationId(final long correlationId)
     {
@@ -103,7 +112,7 @@ public class PublicationBuffersReadyFlyweight
     /**
      * Get the registration id field.
      *
-     * @return registration id field
+     * @return registration id field.
      */
     public long registrationId()
     {
@@ -111,10 +120,10 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Set the correlation id field
+     * Set the correlation id field.
      *
-     * @param registrationId field value
-     * @return flyweight
+     * @param registrationId field value.
+     * @return this for a fluent API.
      */
     public PublicationBuffersReadyFlyweight registrationId(final long registrationId)
     {
@@ -124,9 +133,9 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Get the session id field
+     * Get the session id field.
      *
-     * @return session id field
+     * @return session id field.
      */
     public int sessionId()
     {
@@ -134,10 +143,10 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Set the session id field
+     * Set the session id field.
      *
-     * @param sessionId field value
-     * @return flyweight
+     * @param sessionId field value.
+     * @return this for a fluent API.
      */
     public PublicationBuffersReadyFlyweight sessionId(final int sessionId)
     {
@@ -147,9 +156,9 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Get the stream id field
+     * Get the stream id field.
      *
-     * @return stream id field
+     * @return stream id field.
      */
     public int streamId()
     {
@@ -157,10 +166,10 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Set the stream id field
+     * Set the stream id field.
      *
-     * @param streamId field value
-     * @return flyweight
+     * @param streamId field value.
+     * @return this for a fluent API.
      */
     public PublicationBuffersReadyFlyweight streamId(final int streamId)
     {
@@ -180,10 +189,10 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * set position counter id field
+     * set position counter id field.
      *
-     * @param positionCounterId field value
-     * @return flyweight
+     * @param positionCounterId field value.
+     * @return this for a fluent API.
      */
     public PublicationBuffersReadyFlyweight publicationLimitCounterId(final int positionCounterId)
     {
@@ -203,10 +212,10 @@ public class PublicationBuffersReadyFlyweight
     }
 
     /**
-     * Set channel status counter id field
+     * Set channel status counter id field.
      *
-     * @param counterId field value
-     * @return flyweight
+     * @param counterId field value.
+     * @return this for a fluent API.
      */
     public PublicationBuffersReadyFlyweight channelStatusCounterId(final int counterId)
     {

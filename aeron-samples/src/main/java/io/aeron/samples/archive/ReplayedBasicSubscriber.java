@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.samples.SampleConfiguration;
 import io.aeron.samples.SamplesUtil;
 import org.agrona.collections.MutableLong;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -40,20 +40,25 @@ public class ReplayedBasicSubscriber
     private static final String CHANNEL = SampleConfiguration.CHANNEL;
     private static final int FRAGMENT_COUNT_LIMIT = SampleConfiguration.FRAGMENT_COUNT_LIMIT;
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         System.out.println("Subscribing to " + CHANNEL + " on stream id " + STREAM_ID);
 
-        final FragmentHandler fragmentHandler = SamplesUtil.printStringMessage(STREAM_ID);
-        final AtomicBoolean running = new AtomicBoolean(true);
-
-        SigInt.register(() -> running.set(false));
+        final FragmentHandler fragmentHandler = SamplesUtil.printAsciiMessage(STREAM_ID);
 
         // Create a unique response stream id so not to clash with other archive clients.
         final AeronArchive.Context archiveCtx = new AeronArchive.Context()
             .controlResponseStreamId(AeronArchive.Configuration.controlResponseStreamId() + 2);
 
-        try (AeronArchive archive = AeronArchive.connect(archiveCtx))
+        final AtomicBoolean running = new AtomicBoolean(true);
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false));
+            AeronArchive archive = AeronArchive.connect(archiveCtx))
         {
             final long recordingId = findLatestRecording(archive);
             final long position = 0L;

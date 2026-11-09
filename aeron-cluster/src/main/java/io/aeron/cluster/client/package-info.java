@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,6 @@
  */
 
 /**
- * {@link io.aeron.cluster.client.AeronCluster} clients interact with resilient services running in the cluster.
+ * {@link io.aeron.cluster.client.AeronCluster} clients interact with fault-tolerant services running in the cluster.
  */
 package io.aeron.cluster.client;

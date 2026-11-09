@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@
  */
 package io.aeron.driver.media;
 
-import io.aeron.driver.MediaDriver;
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.HeaderFlyweight;
 import io.aeron.protocol.NakFlyweight;
+import io.aeron.protocol.ResponseSetupFlyweight;
 import io.aeron.protocol.RttMeasurementFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
 import org.agrona.BitUtil;
@@ -28,12 +29,13 @@ import java.util.UUID;
 
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
+import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
  * Thread local variables that will only be accessed in the context of the Receiver agent thread from within a
  * {@link ReceiveChannelEndpoint} subclass.
  */
-public class ReceiveChannelEndpointThreadLocals
+public final class ReceiveChannelEndpointThreadLocals
 {
     private final ByteBuffer smBuffer;
     private final StatusMessageFlyweight statusMessageFlyweight;
@@ -41,19 +43,27 @@ public class ReceiveChannelEndpointThreadLocals
     private final NakFlyweight nakFlyweight;
     private final ByteBuffer rttMeasurementBuffer;
     private final RttMeasurementFlyweight rttMeasurementFlyweight;
-    private final long receiverId;
+    private final ByteBuffer responseSetupBuffer;
+    private final ResponseSetupFlyweight responseSetupHeader;
+    private final ByteBuffer errorBuffer;
+    private final ErrorFlyweight errorFlyweight;
+    private long nextReceiverId;
 
-    public ReceiveChannelEndpointThreadLocals(final MediaDriver.Context context)
+    /**
+     * Construct a set of local state to be used by the receiver thread.
+     */
+    public ReceiveChannelEndpointThreadLocals()
     {
-        final byte[] applicationSpecificFeedback = context.applicationSpecificFeedback();
-        final int smLength = StatusMessageFlyweight.HEADER_LENGTH + applicationSpecificFeedback.length;
+        final int smLength = StatusMessageFlyweight.HEADER_LENGTH + SIZE_OF_LONG;
         final int bufferLength =
             BitUtil.align(smLength, CACHE_LINE_LENGTH) +
             BitUtil.align(NakFlyweight.HEADER_LENGTH, CACHE_LINE_LENGTH) +
-            BitUtil.align(RttMeasurementFlyweight.HEADER_LENGTH, CACHE_LINE_LENGTH);
+            BitUtil.align(RttMeasurementFlyweight.HEADER_LENGTH, CACHE_LINE_LENGTH) +
+            BitUtil.align(ResponseSetupFlyweight.HEADER_LENGTH, CACHE_LINE_LENGTH) +
+            BitUtil.align(ErrorFlyweight.MAX_ERROR_FRAME_LENGTH, CACHE_LINE_LENGTH);
 
         final UUID uuid = UUID.randomUUID();
-        receiverId = uuid.getMostSignificantBits() ^ uuid.getLeastSignificantBits();
+        nextReceiverId = uuid.getMostSignificantBits() ^ uuid.getLeastSignificantBits();
 
         final ByteBuffer byteBuffer = BufferUtil.allocateDirectAligned(bufferLength, CACHE_LINE_LENGTH);
 
@@ -71,12 +81,22 @@ public class ReceiveChannelEndpointThreadLocals
         rttMeasurementBuffer = byteBuffer.slice();
         rttMeasurementFlyweight = new RttMeasurementFlyweight(rttMeasurementBuffer);
 
+        final int responseSetupOffset = rttMeasurementOffset + BitUtil.align(
+            RttMeasurementFlyweight.HEADER_LENGTH, CACHE_LINE_LENGTH);
+        byteBuffer.limit(responseSetupOffset + ResponseSetupFlyweight.HEADER_LENGTH).position(responseSetupOffset);
+        responseSetupBuffer = byteBuffer.slice();
+        responseSetupHeader = new ResponseSetupFlyweight(responseSetupBuffer);
+
+        final int errorOffset = responseSetupOffset + BitUtil.align(
+            ResponseSetupFlyweight.HEADER_LENGTH, FRAME_ALIGNMENT);
+        byteBuffer.limit(errorOffset + ErrorFlyweight.MAX_ERROR_FRAME_LENGTH).position(errorOffset);
+        errorBuffer = byteBuffer.slice();
+        errorFlyweight = new ErrorFlyweight(errorBuffer);
+
         statusMessageFlyweight
-            .applicationSpecificFeedback(applicationSpecificFeedback, 0, applicationSpecificFeedback.length)
-            .receiverId(receiverId)
             .version(HeaderFlyweight.CURRENT_VERSION)
             .headerType(HeaderFlyweight.HDR_TYPE_SM)
-            .frameLength(StatusMessageFlyweight.HEADER_LENGTH + applicationSpecificFeedback.length);
+            .frameLength(StatusMessageFlyweight.HEADER_LENGTH);
 
         nakFlyweight
             .version(HeaderFlyweight.CURRENT_VERSION)
@@ -84,44 +104,139 @@ public class ReceiveChannelEndpointThreadLocals
             .frameLength(NakFlyweight.HEADER_LENGTH);
 
         rttMeasurementFlyweight
-            .receiverId(receiverId)
             .version(HeaderFlyweight.CURRENT_VERSION)
             .headerType(HeaderFlyweight.HDR_TYPE_RTTM)
             .frameLength(RttMeasurementFlyweight.HEADER_LENGTH);
+
+        responseSetupHeader
+            .version(HeaderFlyweight.CURRENT_VERSION)
+            .headerType(HeaderFlyweight.HDR_TYPE_RSP_SETUP)
+            .frameLength(ResponseSetupFlyweight.HEADER_LENGTH);
+
+        errorFlyweight
+            .version(HeaderFlyweight.CURRENT_VERSION)
+            .headerType(HeaderFlyweight.HDR_TYPE_ERR)
+            .frameLength(ErrorFlyweight.HEADER_LENGTH);
     }
 
-    public ByteBuffer smBuffer()
+    /**
+     * Buffer for writing status messages to send.
+     *
+     * @return buffer for writing status messages to send.
+     */
+    public ByteBuffer statusMessageBuffer()
     {
         return smBuffer;
     }
 
+    /**
+     * Flyweight over the {@link #statusMessageBuffer()}.
+     *
+     * @return flyweight over the {@link #statusMessageBuffer()}.
+     */
     public StatusMessageFlyweight statusMessageFlyweight()
     {
         return statusMessageFlyweight;
     }
 
+    /**
+     * Buffer for writing NAK messages to send.
+     *
+     * @return buffer for writing NAK messages to send.
+     */
     public ByteBuffer nakBuffer()
     {
         return nakBuffer;
     }
 
+    /**
+     * Flyweight over the {@link #nakBuffer()}.
+     *
+     * @return flyweight over the {@link #nakBuffer()}.
+     */
     public NakFlyweight nakFlyweight()
     {
         return nakFlyweight;
     }
 
+    /**
+     * Buffer for writing RTT measurement messages to send.
+     *
+     * @return buffer for writing RTT measurement messages to send.
+     */
     public ByteBuffer rttMeasurementBuffer()
     {
         return rttMeasurementBuffer;
     }
 
+    /**
+     * Flyweight over the {@link #rttMeasurementBuffer()}.
+     *
+     * @return flyweight over the {@link #rttMeasurementBuffer()}.
+     */
     public RttMeasurementFlyweight rttMeasurementFlyweight()
     {
         return rttMeasurementFlyweight;
     }
 
-    public long receiverId()
+    /**
+     * Buffer for writing Response Setup messages to send.
+     *
+     * @return buffer for writing Response Setup messages to send.
+     */
+    public ByteBuffer responseSetupBuffer()
     {
-        return receiverId;
+        return responseSetupBuffer;
+    }
+
+    /**
+     * Flyweight over the {@link #responseSetupBuffer()}.
+     *
+     * @return flyweight over the {@link #responseSetupBuffer()}.
+     */
+    public ResponseSetupFlyweight responseSetupHeader()
+    {
+        return responseSetupHeader;
+    }
+
+    /**
+     * Buffer for writing the Error messages to send.
+     *
+     * @return buffer for writing the error messages to send.
+     */
+    public ByteBuffer errorBuffer()
+    {
+        return errorBuffer;
+    }
+
+    /**
+     * Flyweight over the {@link #errorBuffer()}.
+     *
+     * @return flyweight over the {@link #errorBuffer()}.
+     */
+    public ErrorFlyweight errorFlyweight()
+    {
+        return errorFlyweight;
+    }
+
+    /**
+     * Get the next receiver id to be used for a receiver channel identity.
+     *
+     * @return the next receiver id to be used for a receiver channel identity.
+     */
+    public long nextReceiverId()
+    {
+        return nextReceiverId++;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "ReceiveChannelEndpointThreadLocals{" +
+            "nextReceiverId=" + nextReceiverId +
+            '}';
     }
 }

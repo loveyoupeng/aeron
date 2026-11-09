@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,6 +30,7 @@ import static io.aeron.command.ControlProtocolEvents.*;
 class DriverEventsAdapter implements MessageHandler
 {
     private final ErrorResponseFlyweight errorResponse = new ErrorResponseFlyweight();
+    private final PublicationErrorFrameFlyweight publicationErrorFrame = new PublicationErrorFrameFlyweight();
     private final PublicationBuffersReadyFlyweight publicationReady = new PublicationBuffersReadyFlyweight();
     private final SubscriptionReadyFlyweight subscriptionReady = new SubscriptionReadyFlyweight();
     private final ImageBuffersReadyFlyweight imageReady = new ImageBuffersReadyFlyweight();
@@ -37,9 +38,11 @@ class DriverEventsAdapter implements MessageHandler
     private final ImageMessageFlyweight imageMessage = new ImageMessageFlyweight();
     private final CounterUpdateFlyweight counterUpdate = new CounterUpdateFlyweight();
     private final ClientTimeoutFlyweight clientTimeout = new ClientTimeoutFlyweight();
-    private final LongHashSet asyncCommandIdSet;
+    private final StaticCounterFlyweight staticCounter = new StaticCounterFlyweight();
+    private final NextAvailableSessionIdFlyweight nextSessionId = new NextAvailableSessionIdFlyweight();
     private final CopyBroadcastReceiver receiver;
-    private final DriverEventsListener listener;
+    private final ClientConductor conductor;
+    private final LongHashSet asyncCommandIdSet;
     private final long clientId;
 
     private long activeCorrelationId;
@@ -47,14 +50,14 @@ class DriverEventsAdapter implements MessageHandler
     private boolean isInvalid;
 
     DriverEventsAdapter(
-        final CopyBroadcastReceiver receiver,
         final long clientId,
-        final DriverEventsListener listener,
+        final CopyBroadcastReceiver receiver,
+        final ClientConductor conductor,
         final LongHashSet asyncCommandIdSet)
     {
-        this.receiver = receiver;
         this.clientId = clientId;
-        this.listener = listener;
+        this.receiver = receiver;
+        this.conductor = conductor;
         this.asyncCommandIdSet = asyncCommandIdSet;
     }
 
@@ -98,26 +101,27 @@ class DriverEventsAdapter implements MessageHandler
             {
                 errorResponse.wrap(buffer, index);
 
-                final int correlationId = (int)errorResponse.offendingCommandCorrelationId();
+                final long correlationId = errorResponse.offendingCommandCorrelationId();
                 final int errorCodeValue = errorResponse.errorCodeValue();
                 final ErrorCode errorCode = ErrorCode.get(errorCodeValue);
                 boolean notProcessed = true;
 
                 if (CHANNEL_ENDPOINT_ERROR == errorCode)
                 {
+                    // This code is left for backwards compatibility with older media driver versions
                     notProcessed = false;
-                    listener.onChannelEndpointError(correlationId, errorResponse.errorMessage());
+                    conductor.onChannelEndpointError(correlationId, errorResponse.errorMessage());
                 }
                 else if (correlationId == activeCorrelationId)
                 {
                     notProcessed = false;
                     receivedCorrelationId = correlationId;
-                    listener.onError(correlationId, errorCodeValue, errorCode, errorResponse.errorMessage());
+                    conductor.onError(correlationId, errorCodeValue, errorCode, errorResponse.errorMessage());
                 }
 
                 if (asyncCommandIdSet.remove(correlationId) && notProcessed)
                 {
-                    listener.onAsyncError(correlationId, errorCodeValue, errorCode, errorResponse.errorMessage());
+                    conductor.onAsyncError(correlationId, errorCodeValue, errorCode, errorResponse.errorMessage());
                 }
                 break;
             }
@@ -126,7 +130,7 @@ class DriverEventsAdapter implements MessageHandler
             {
                 imageReady.wrap(buffer, index);
 
-                listener.onAvailableImage(
+                conductor.onAvailableImage(
                     imageReady.correlationId(),
                     imageReady.sessionId(),
                     imageReady.subscriptionRegistrationId(),
@@ -141,10 +145,10 @@ class DriverEventsAdapter implements MessageHandler
                 publicationReady.wrap(buffer, index);
 
                 final long correlationId = publicationReady.correlationId();
-                if (correlationId == activeCorrelationId)
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
                 {
                     receivedCorrelationId = correlationId;
-                    listener.onNewPublication(
+                    conductor.onNewPublication(
                         correlationId,
                         publicationReady.registrationId(),
                         publicationReady.streamId(),
@@ -161,10 +165,10 @@ class DriverEventsAdapter implements MessageHandler
                 subscriptionReady.wrap(buffer, index);
 
                 final long correlationId = subscriptionReady.correlationId();
-                if (correlationId == activeCorrelationId)
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
                 {
                     receivedCorrelationId = correlationId;
-                    listener.onNewSubscription(correlationId, subscriptionReady.channelStatusCounterId());
+                    conductor.onNewSubscription(correlationId, subscriptionReady.channelStatusCounterId());
                 }
                 break;
             }
@@ -186,7 +190,7 @@ class DriverEventsAdapter implements MessageHandler
             {
                 imageMessage.wrap(buffer, index);
 
-                listener.onUnavailableImage(
+                conductor.onUnavailableImage(
                     imageMessage.correlationId(),
                     imageMessage.subscriptionRegistrationId());
                 break;
@@ -197,10 +201,10 @@ class DriverEventsAdapter implements MessageHandler
                 publicationReady.wrap(buffer, index);
 
                 final long correlationId = publicationReady.correlationId();
-                if (correlationId == activeCorrelationId)
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
                 {
                     receivedCorrelationId = correlationId;
-                    listener.onNewExclusivePublication(
+                    conductor.onNewExclusivePublication(
                         correlationId,
                         publicationReady.registrationId(),
                         publicationReady.streamId(),
@@ -218,14 +222,14 @@ class DriverEventsAdapter implements MessageHandler
 
                 final int counterId = counterUpdate.counterId();
                 final long correlationId = counterUpdate.correlationId();
-                if (correlationId == activeCorrelationId)
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
                 {
                     receivedCorrelationId = correlationId;
-                    listener.onNewCounter(correlationId, counterId);
+                    conductor.onNewCounter(correlationId, counterId);
                 }
                 else
                 {
-                    listener.onAvailableCounter(correlationId, counterId);
+                    conductor.onAvailableCounter(correlationId, counterId);
                 }
                 break;
             }
@@ -234,7 +238,7 @@ class DriverEventsAdapter implements MessageHandler
             {
                 counterUpdate.wrap(buffer, index);
 
-                listener.onUnavailableCounter(counterUpdate.correlationId(), counterUpdate.counterId());
+                conductor.onUnavailableCounter(counterUpdate.correlationId(), counterUpdate.counterId());
                 break;
             }
 
@@ -244,7 +248,42 @@ class DriverEventsAdapter implements MessageHandler
 
                 if (clientTimeout.clientId() == clientId)
                 {
-                    listener.onClientTimeout();
+                    conductor.onClientTimeout();
+                }
+                break;
+            }
+
+            case ON_STATIC_COUNTER:
+            {
+                staticCounter.wrap(buffer, index);
+
+                final long correlationId = staticCounter.correlationId();
+                if (correlationId == activeCorrelationId || asyncCommandIdSet.remove(correlationId))
+                {
+                    final int counterId = staticCounter.counterId();
+                    receivedCorrelationId = correlationId;
+                    conductor.onStaticCounter(correlationId, counterId);
+                }
+                break;
+            }
+
+            case ON_PUBLICATION_ERROR:
+            {
+                publicationErrorFrame.wrap(buffer, index);
+
+                conductor.onPublicationError(publicationErrorFrame);
+                break;
+            }
+
+            case ON_NEXT_AVAILABLE_SESSION_ID:
+            {
+                nextSessionId.wrap(buffer, index);
+
+                final long correlationId = nextSessionId.correlationId();
+                if (correlationId == activeCorrelationId)
+                {
+                    receivedCorrelationId = correlationId;
+                    conductor.onNextAvailableSessionId(nextSessionId.nextSessionId());
                 }
                 break;
             }

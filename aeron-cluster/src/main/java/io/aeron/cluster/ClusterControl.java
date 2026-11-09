@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,11 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.CncFileDescriptor;
-import io.aeron.CommonContext;
+import io.aeron.*;
 import io.aeron.cluster.client.ClusterException;
-import org.agrona.DirectBuffer;
-import org.agrona.IoUtil;
-import org.agrona.concurrent.AtomicBuffer;
+import io.aeron.cluster.service.ClusterCounters;
+import io.aeron.cluster.service.ClusteredServiceContainer;
+import org.agrona.*;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersReader;
 
@@ -29,14 +28,12 @@ import java.nio.MappedByteBuffer;
 import java.nio.charset.StandardCharsets;
 
 import static io.aeron.CncFileDescriptor.*;
-import static org.agrona.concurrent.status.CountersReader.RECORD_ALLOCATED;
-import static org.agrona.concurrent.status.CountersReader.TYPE_ID_OFFSET;
 
 /**
  * Toggle control {@link ToggleState}s for a cluster node such as {@link ToggleState#SUSPEND} or
  * {@link ToggleState#RESUME}. This can only be applied to the {@link io.aeron.cluster.service.Cluster.Role#LEADER}.
  */
-public class ClusterControl
+public final class ClusterControl
 {
     /**
      * Toggle states for controlling the cluster node once it has entered the active state after initialising.
@@ -78,23 +75,24 @@ public class ClusterControl
         /**
          * Abort processing and terminate the cluster without taking a snapshot.
          */
-        ABORT(6);
+        ABORT(6),
+
+        /**
+         * Trigger a snapshot that will only occur on a cluster standby.
+         */
+        STANDBY_SNAPSHOT(7);
 
         private final int code;
 
-        private static final ToggleState[] STATES;
-        static
-        {
-            final ToggleState[] toggleStates = values();
-            STATES = new ToggleState[toggleStates.length];
-            for (final ToggleState toggleState : toggleStates)
-            {
-                STATES[toggleState.code()] = toggleState;
-            }
-        }
+        private static final ToggleState[] STATES = values();
 
         ToggleState(final int code)
         {
+            if (code != ordinal())
+            {
+                throw new IllegalArgumentException(name() + " - code must equal ordinal value: code=" + code);
+            }
+
             this.code = code;
         }
 
@@ -111,13 +109,19 @@ public class ClusterControl
         /**
          * Toggle the control counter to trigger the requested {@link ToggleState}.
          * <p>
-         * This action is thread safe and will only succeed if the toggle is in the {@link ToggleState#NEUTRAL} state.
+         * This action is thread safe and will succeed if the toggle is in the {@link ToggleState#NEUTRAL} state,
+         * or if toggle is {@link ToggleState#SUSPEND} and requested state is {@link ToggleState#RESUME}.
          *
          * @param controlToggle to change to the trigger state.
          * @return true if the counter toggles or false if it is in a state other than {@link ToggleState#NEUTRAL}.
          */
         public final boolean toggle(final AtomicCounter controlToggle)
         {
+            if (code() == RESUME.code() && controlToggle.get() == SUSPEND.code())
+            {
+                return controlToggle.compareAndSet(SUSPEND.code(), RESUME.code());
+            }
+
             return controlToggle.compareAndSet(NEUTRAL.code(), code());
         }
 
@@ -160,8 +164,12 @@ public class ClusterControl
          */
         public static ToggleState get(final AtomicCounter controlToggle)
         {
-            final long toggleValue = controlToggle.get();
+            if (controlToggle.isClosed())
+            {
+                throw new ClusterException("counter is closed");
+            }
 
+            final long toggleValue = controlToggle.get();
             if (toggleValue < 0 || toggleValue > (STATES.length - 1))
             {
                 throw new ClusterException("invalid toggle value: " + toggleValue);
@@ -171,31 +179,14 @@ public class ClusterControl
         }
     }
 
+    private ClusterControl()
+    {
+    }
+
     /**
      * Counter type id for the control toggle.
      */
-    public static final int CONTROL_TOGGLE_TYPE_ID = 202;
-
-    /**
-     * Map a {@link CountersReader} over the default location CnC file.
-     *
-     * @return a {@link CountersReader} over the default location CnC file.
-     */
-    public static CountersReader mapCounters()
-    {
-        return mapCounters(CommonContext.newDefaultCncFile());
-    }
-
-    /**
-     * Map a {@link CountersReader} over the provided filename for the CnC file.
-     *
-     * @param filename for the CnC file.
-     * @return a {@link CountersReader} over the provided CnC file.
-     */
-    public static CountersReader mapCounters(final String filename)
-    {
-        return mapCounters(new File(filename));
-    }
+    public static final int CONTROL_TOGGLE_TYPE_ID = AeronCounters.CLUSTER_CONTROL_TOGGLE_TYPE_ID;
 
     /**
      * Map a {@link CountersReader} over the provided {@link File} for the CnC file.
@@ -220,27 +211,26 @@ public class ClusterControl
     /**
      * Find the control toggle counter or return null if not found.
      *
-     * @param counters to search for the control toggle.
+     * @param counters  to search within.
+     * @param clusterId to which the allocated counter belongs.
      * @return the control toggle counter or return null if not found.
      */
-    public static AtomicCounter findControlToggle(final CountersReader counters)
+    public static AtomicCounter findControlToggle(final CountersReader counters, final int clusterId)
     {
-        final AtomicBuffer buffer = counters.metaDataBuffer();
-
-        for (int i = 0, size = counters.maxCounterId(); i < size; i++)
+        final int counterId = ClusterCounters.find(counters, CONTROL_TOGGLE_TYPE_ID, clusterId);
+        if (Aeron.NULL_VALUE != counterId)
         {
-            final int recordOffset = CountersReader.metaDataOffset(i);
-
-            if (counters.getCounterState(i) == RECORD_ALLOCATED &&
-                buffer.getInt(recordOffset + TYPE_ID_OFFSET) == CONTROL_TOGGLE_TYPE_ID)
-            {
-                return new AtomicCounter(counters.valuesBuffer(), i, null);
-            }
+            return new AtomicCounter(counters.valuesBuffer(), counterId, null);
         }
 
         return null;
     }
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         checkUsage(args);
@@ -251,7 +241,8 @@ public class ClusterControl
         System.out.println("Command `n Control file " + cncFile);
 
         final CountersReader countersReader = mapCounters(cncFile);
-        final AtomicCounter controlToggle = findControlToggle(countersReader);
+        final int clusterId = ClusteredServiceContainer.Configuration.clusterId();
+        final AtomicCounter controlToggle = findControlToggle(countersReader, clusterId);
 
         if (null == controlToggle)
         {
@@ -273,8 +264,8 @@ public class ClusterControl
     {
         if (1 != args.length)
         {
-            System.out.format("Usage: [-Daeron.dir=<directory containing CnC file>] " +
-                ClusterControl.class.getSimpleName() + " <action>%n");
+            System.out.format("Usage: [-Daeron.dir=<directory containing CnC file> -Daeron.cluster.id=<id>] " +
+                ClusterControl.class.getName() + " <action>%n");
 
             System.exit(0);
         }

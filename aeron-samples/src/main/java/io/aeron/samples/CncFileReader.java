@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@ package io.aeron.samples;
 import io.aeron.CncFileDescriptor;
 import io.aeron.CommonContext;
 import io.aeron.exceptions.AeronException;
+import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
-import org.agrona.IoUtil;
 import org.agrona.SemanticVersion;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.ringbuffer.RingBufferDescriptor;
@@ -27,6 +27,7 @@ import org.agrona.concurrent.status.CountersReader;
 
 import java.io.File;
 import java.nio.MappedByteBuffer;
+import java.nio.charset.StandardCharsets;
 
 import static io.aeron.CncFileDescriptor.*;
 import static io.aeron.samples.SamplesUtil.mapExistingFileReadOnly;
@@ -37,6 +38,7 @@ import static io.aeron.samples.SamplesUtil.mapExistingFileReadOnly;
 public final class CncFileReader implements AutoCloseable
 {
     private boolean isClosed = false;
+    private final int driverPid;
     private final int cncVersion;
     private final String cncSemanticVersion;
     private final MappedByteBuffer cncByteBuffer;
@@ -48,6 +50,7 @@ public final class CncFileReader implements AutoCloseable
         this.cncByteBuffer = cncByteBuffer;
 
         final DirectBuffer cncMetaDataBuffer = createMetaDataBuffer(cncByteBuffer);
+        driverPid = cncMetaDataBuffer.getInt(pidOffset(0));
         final int cncVersion = cncMetaDataBuffer.getInt(cncVersionOffset(0));
 
         try
@@ -56,7 +59,7 @@ public final class CncFileReader implements AutoCloseable
         }
         catch (final AeronException e)
         {
-            IoUtil.unmap(cncByteBuffer);
+            BufferUtil.free(cncByteBuffer);
             throw e;
         }
 
@@ -67,14 +70,15 @@ public final class CncFileReader implements AutoCloseable
 
         this.countersReader = new CountersReader(
             createCountersMetaDataBuffer(cncByteBuffer, cncMetaDataBuffer),
-            createCountersValuesBuffer(cncByteBuffer, cncMetaDataBuffer));
+            createCountersValuesBuffer(cncByteBuffer, cncMetaDataBuffer),
+            StandardCharsets.US_ASCII);
     }
 
     /**
      * Map an existing CnC file.
      *
-     * @throws AeronException if the cnc version major version is not compatible.
      * @return the {@link CncFileReader} wrapper for reading useful data from the cnc file.
+     * @throws AeronException if the cnc version major version is not compatible.
      */
     public static CncFileReader map()
     {
@@ -107,7 +111,7 @@ public final class CncFileReader implements AutoCloseable
     /**
      * Get the counters reader for querying counter values.
      *
-     * @return the counters reader.
+     * @return the counters' reader.
      */
     public CountersReader countersReader()
     {
@@ -128,6 +132,16 @@ public final class CncFileReader implements AutoCloseable
     }
 
     /**
+     * Return media driver PID that is stored in the CnC file.
+     *
+     * @return media driver PID.
+     */
+    public int driverPid()
+    {
+        return driverPid;
+    }
+
+    /**
      * Get the number of milliseconds since the last driver heartbeat.
      *
      * @return the number of milliseconds since the last driver heartbeat.
@@ -137,12 +151,16 @@ public final class CncFileReader implements AutoCloseable
         return System.currentTimeMillis() - driverHeartbeatMs();
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
         if (!isClosed)
         {
             isClosed = true;
-            IoUtil.unmap(cncByteBuffer);
+            BufferUtil.free(cncByteBuffer);
         }
     }
 }

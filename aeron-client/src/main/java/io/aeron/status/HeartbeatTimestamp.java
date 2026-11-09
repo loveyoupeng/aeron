@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.status;
 
+import io.aeron.AeronCounters;
 import org.agrona.BitUtil;
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
@@ -29,15 +30,19 @@ import static org.agrona.concurrent.status.CountersReader.*;
 /**
  * Allocate a counter for tracking the last heartbeat of an entity with a given registration id.
  */
-public class HeartbeatTimestamp
+public final class HeartbeatTimestamp
 {
-    /**
-     * Type id of an Aeron client heartbeat.
-     */
-    public static final int CLIENT_HEARTBEAT_TYPE_ID = 11;
+    private HeartbeatTimestamp()
+    {
+    }
 
     /**
-     * Offset in the key meta data for the registration id of the counter.
+     * Type id of a heartbeat counter.
+     */
+    public static final int HEARTBEAT_TYPE_ID = AeronCounters.DRIVER_HEARTBEAT_TYPE_ID;
+
+    /**
+     * Offset in the key metadata for the registration id of the counter.
      */
     public static final int REGISTRATION_ID_OFFSET = 0;
 
@@ -47,7 +52,7 @@ public class HeartbeatTimestamp
      * @param tempBuffer      to be used for labels and key.
      * @param name            of the counter for the label.
      * @param typeId          of the counter for classification.
-     * @param countersManager from which to allocated the underlying storage.
+     * @param countersManager from which the underlying storage is allocated.
      * @param registrationId  to be associated with the counter.
      * @return a new {@link AtomicCounter} for tracking the last heartbeat.
      */
@@ -70,7 +75,7 @@ public class HeartbeatTimestamp
      * @param tempBuffer      to be used for labels and key.
      * @param name            of the counter for the label.
      * @param typeId          of the counter for classification.
-     * @param countersManager from which to allocated the underlying storage.
+     * @param countersManager from which the underlying storage is allocated.
      * @param registrationId  to be associated with the counter.
      * @return the counter id to be used.
      */
@@ -87,7 +92,7 @@ public class HeartbeatTimestamp
         final int labelOffset = BitUtil.align(keyLength, SIZE_OF_INT);
         int labelLength = 0;
         labelLength += tempBuffer.putStringWithoutLengthAscii(labelOffset + labelLength, name);
-        labelLength += tempBuffer.putStringWithoutLengthAscii(labelOffset + labelLength, ": ");
+        labelLength += tempBuffer.putStringWithoutLengthAscii(labelOffset + labelLength, ": id=");
         labelLength += tempBuffer.putLongAscii(labelOffset + labelLength, registrationId);
 
         return countersManager.allocate(
@@ -113,17 +118,20 @@ public class HeartbeatTimestamp
     {
         final DirectBuffer buffer = countersReader.metaDataBuffer();
 
-        for (int i = 0, size = countersReader.maxCounterId(); i < size; i++)
+        for (int counterId = 0, maxId = countersReader.maxCounterId(); counterId <= maxId; counterId++)
         {
-            if (countersReader.getCounterState(i) == RECORD_ALLOCATED)
+            final int counterState = countersReader.getCounterState(counterId);
+            if (counterState == RECORD_ALLOCATED)
             {
-                final int recordOffset = CountersReader.metaDataOffset(i);
-
-                if (buffer.getInt(recordOffset + TYPE_ID_OFFSET) == counterTypeId &&
-                    buffer.getLong(recordOffset + KEY_OFFSET + REGISTRATION_ID_OFFSET) == registrationId)
+                if (countersReader.getCounterTypeId(counterId) == counterTypeId &&
+                    buffer.getLong(metaDataOffset(counterId) + KEY_OFFSET + REGISTRATION_ID_OFFSET) == registrationId)
                 {
-                    return i;
+                    return counterId;
                 }
+            }
+            else if (RECORD_UNUSED == counterState)
+            {
+                break;
             }
         }
 
@@ -145,7 +153,7 @@ public class HeartbeatTimestamp
         final DirectBuffer buffer = countersReader.metaDataBuffer();
         final int recordOffset = CountersReader.metaDataOffset(counterId);
 
-        return buffer.getInt(recordOffset + TYPE_ID_OFFSET) == counterTypeId &&
+        return countersReader.getCounterTypeId(counterId) == counterTypeId &&
             buffer.getLong(recordOffset + KEY_OFFSET + REGISTRATION_ID_OFFSET) == registrationId &&
             countersReader.getCounterState(counterId) == RECORD_ALLOCATED;
     }

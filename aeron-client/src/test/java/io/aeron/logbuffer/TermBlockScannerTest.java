@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,43 +15,42 @@
  */
 package io.aeron.logbuffer;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.agrona.BitUtil;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import static io.aeron.logbuffer.FrameDescriptor.typeOffset;
 import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_DATA;
 import static io.aeron.protocol.HeaderFlyweight.HDR_TYPE_PAD;
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static io.aeron.logbuffer.FrameDescriptor.lengthOffset;
 
-public class TermBlockScannerTest
+class TermBlockScannerTest
 {
     private final UnsafeBuffer termBuffer = mock(UnsafeBuffer.class);
 
-    @Before
-    public void before()
+    @BeforeEach
+    void before()
     {
         when(termBuffer.capacity()).thenReturn(LogBufferDescriptor.TERM_MIN_LENGTH);
     }
 
     @Test
-    public void shouldScanEmptyBuffer()
+    void shouldScanEmptyBuffer()
     {
         final int offset = 0;
         final int limit = termBuffer.capacity();
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(newOffset, is(offset));
+        assertEquals(offset, newOffset);
     }
 
     @Test
-    public void shouldReadFirstMessage()
+    void shouldReadFirstMessage()
     {
         final int offset = 0;
         final int limit = termBuffer.capacity();
@@ -62,11 +61,11 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(offset))).thenReturn((short)HDR_TYPE_DATA);
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(newOffset, is(alignedMessageLength));
+        assertEquals(alignedMessageLength, newOffset);
     }
 
     @Test
-    public void shouldReadBlockOfTwoMessages()
+    void shouldReadBlockOfTwoMessages()
     {
         final int offset = 0;
         final int limit = termBuffer.capacity();
@@ -79,11 +78,11 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(alignedMessageLength))).thenReturn((short)HDR_TYPE_DATA);
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(newOffset, is(alignedMessageLength * 2));
+        assertEquals(alignedMessageLength * 2, newOffset);
     }
 
     @Test
-    public void shouldReadBlockOfThreeMessagesThatFillBuffer()
+    void shouldReadBlockOfThreeMessagesThatFillBuffer()
     {
         final int offset = 0;
         final int limit = termBuffer.capacity();
@@ -99,11 +98,11 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(alignedMessageLength * 2))).thenReturn((short)HDR_TYPE_DATA);
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(newOffset, is(limit));
+        assertEquals(limit, newOffset);
     }
 
     @Test
-    public void shouldReadBlockOfTwoMessagesBecauseOfLimit()
+    void shouldReadBlockOfTwoMessagesBecauseOfLimit()
     {
         final int offset = 0;
         final int messageLength = 50;
@@ -118,11 +117,11 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(alignedMessageLength * 2))).thenReturn((short)HDR_TYPE_DATA);
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(newOffset, is(alignedMessageLength * 2));
+        assertEquals(alignedMessageLength * 2, newOffset);
     }
 
     @Test
-    public void shouldFailToReadFirstMessageBecauseOfLimit()
+    void shouldFailToReadFirstMessageBecauseOfLimit()
     {
         final int offset = 0;
         final int messageLength = 50;
@@ -133,11 +132,11 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(offset))).thenReturn((short)HDR_TYPE_DATA);
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(newOffset, is(offset));
+        assertEquals(offset, newOffset);
     }
 
     @Test
-    public void shouldReadOneMessageOnLimit()
+    void shouldReadOneMessageOnLimit()
     {
         final int offset = 0;
         final int messageLength = 50;
@@ -147,11 +146,11 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(offset))).thenReturn((short)HDR_TYPE_DATA);
 
         final int newOffset = TermBlockScanner.scan(termBuffer, offset, alignedMessageLength);
-        assertThat(newOffset, is(alignedMessageLength));
+        assertEquals(alignedMessageLength, newOffset);
     }
 
     @Test
-    public void shouldReadBlockOfOneMessageThenPadding()
+    void shouldReadBlockOfOneMessageThenPadding()
     {
         final int offset = 0;
         final int limit = termBuffer.capacity();
@@ -164,9 +163,9 @@ public class TermBlockScannerTest
         when(termBuffer.getShort(typeOffset(alignedMessageLength))).thenReturn((short)HDR_TYPE_PAD);
 
         final int firstOffset = TermBlockScanner.scan(termBuffer, offset, limit);
-        assertThat(firstOffset, is(alignedMessageLength));
+        assertEquals(alignedMessageLength, firstOffset);
 
         final int secondOffset = TermBlockScanner.scan(termBuffer, firstOffset, limit);
-        assertThat(secondOffset, is(alignedMessageLength * 2));
+        assertEquals(alignedMessageLength * 2, secondOffset);
     }
 }

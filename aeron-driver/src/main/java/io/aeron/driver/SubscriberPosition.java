@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,13 +20,13 @@ import org.agrona.concurrent.status.Position;
 /**
  * Consumption position a subscriber has got to within a {@link SubscriptionLink}.
  */
-public final class SubscriberPosition
+final class SubscriberPosition
 {
     private final SubscriptionLink subscriptionLink;
     private final Subscribable subscribable;
     private final Position position;
 
-    public SubscriberPosition(
+    SubscriberPosition(
         final SubscriptionLink subscriptionLink, final Subscribable subscribable, final Position position)
     {
         this.subscriptionLink = subscriptionLink;
@@ -34,28 +34,36 @@ public final class SubscriberPosition
         this.position = position;
     }
 
-    public Position position()
+    Position position()
     {
         return position;
     }
 
-    public int positionCounterId()
+    int positionCounterId()
     {
         return position().id();
     }
 
-    public SubscriptionLink subscription()
+    SubscriptionLink subscription()
     {
         return subscriptionLink;
     }
 
-    public Subscribable subscribable()
-    {
-        return subscribable;
-    }
-
-    public void addLink(final PublicationImage image)
+    void addLink(final PublicationImage image)
     {
         subscriptionLink.link(image, position);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "SubscriberPosition{" +
+            "subscriptionLink=" + subscriptionLink +
+            ", subscribable=" + subscribable +
+            ", position=" + position +
+            '}';
     }
 }

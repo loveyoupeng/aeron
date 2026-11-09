@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,107 +15,97 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.ChannelUri;
+import io.aeron.Image;
+import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.cluster.client.ClusterException;
+import io.aeron.cluster.service.Cluster;
 import org.agrona.CloseHelper;
+import org.agrona.concurrent.CountedErrorHandler;
 
-class LogReplay implements AutoCloseable
+final class LogReplay
 {
-    enum State
-    {
-        INIT,
-        REPLAY,
-        DONE
-    }
-
-    private final long recordingId;
+    private final AeronArchive archive;
     private final long startPosition;
     private final long stopPosition;
-    private final long leadershipTermId;
+    private final long replaySessionId;
     private final int logSessionId;
-    private final int replayStreamId;
-    private final AeronArchive archive;
     private final ConsensusModuleAgent consensusModuleAgent;
-    private final String channel;
-
-    private int replaySessionId = Aeron.NULL_VALUE;
-    private State state = State.INIT;
-    private Subscription logSubscription;
-    private LogAdapter logAdapter;
+    private final ConsensusModule.Context ctx;
+    private final LogAdapter logAdapter;
+    private final Subscription logSubscription;
 
     LogReplay(
         final AeronArchive archive,
         final long recordingId,
         final long startPosition,
         final long stopPosition,
-        final long leadershipTermId,
-        final int logSessionId,
-        final ConsensusModuleAgent consensusModuleAgent,
+        final LogAdapter logAdapter,
         final ConsensusModule.Context ctx)
     {
         this.archive = archive;
-        this.recordingId = recordingId;
         this.startPosition = startPosition;
         this.stopPosition = stopPosition;
-        this.leadershipTermId = leadershipTermId;
-        this.logSessionId = logSessionId;
-        this.consensusModuleAgent = consensusModuleAgent;
-        this.replayStreamId = ctx.replayStreamId();
+        this.logAdapter = logAdapter;
+        this.consensusModuleAgent = logAdapter.consensusModuleAgent();
+        this.ctx = ctx;
 
-        final Aeron aeron = ctx.aeron();
-
-        final ChannelUri channelUri = ChannelUri.parse(ctx.replayChannel());
-        channelUri.put(CommonContext.SESSION_ID_PARAM_NAME, Integer.toString(logSessionId));
-        this.channel = channelUri.toString();
-
-        logSubscription = aeron.addSubscription(channel, replayStreamId);
+        final String channel = ctx.replayChannel();
+        final int streamId = ctx.replayStreamId();
+        final long length = stopPosition - startPosition;
+        replaySessionId = archive.startReplay(recordingId, startPosition, length, channel, streamId);
+        logSessionId = (int)replaySessionId;
+        logSubscription = ctx.aeron().addSubscription(ChannelUri.addSessionId(channel, logSessionId), streamId);
     }
 
-    public void close()
+    void close()
     {
-        CloseHelper.close(logSubscription);
+        final CountedErrorHandler errorHandler = ctx.countedErrorHandler();
+        try
+        {
+            archive.stopReplay(replaySessionId);
+        }
+        catch (final RuntimeException ex)
+        {
+            errorHandler.onError(ex);
+        }
+        logAdapter.disconnect(errorHandler);
+        CloseHelper.close(errorHandler, logSubscription);
     }
 
-    int doWork(@SuppressWarnings("unused") final long nowMs)
+    int doWork()
     {
         int workCount = 0;
 
-        if (State.INIT == state)
+        if (null == logAdapter.image())
         {
-            consensusModuleAgent.awaitServicesReadyForReplay(
-                channel, replayStreamId, logSessionId, leadershipTermId, startPosition, stopPosition);
+            final Image image = logSubscription.imageBySessionId(logSessionId);
+            if (null != image)
+            {
+                if (image.joinPosition() != startPosition)
+                {
+                    throw new ClusterException(
+                        "joinPosition=" + image.joinPosition() + " expected startPosition=" + startPosition,
+                        ClusterException.Category.WARN);
+                }
 
-            final long length = stopPosition - startPosition;
-            replaySessionId = (int)archive.startReplay(recordingId, startPosition, length, channel, replayStreamId);
-            state = State.REPLAY;
-            workCount = 1;
+                logAdapter.image(image);
+                consensusModuleAgent.awaitServicesReady(
+                    logSubscription.channel(),
+                    logSubscription.streamId(),
+                    logSessionId,
+                    startPosition,
+                    stopPosition,
+                    true,
+                    Cluster.Role.FOLLOWER);
+
+                workCount += 1;
+            }
         }
-        else if (State.REPLAY == state)
+        else
         {
-            if (null == logAdapter)
-            {
-                final Image image = logSubscription.imageBySessionId(replaySessionId);
-                if (null != image)
-                {
-                    logAdapter = new LogAdapter(image, consensusModuleAgent);
-                    workCount = 1;
-                }
-            }
-            else
-            {
-                consensusModuleAgent.replayLogPoll(logAdapter, stopPosition);
-                if (logAdapter.position() == stopPosition)
-                {
-                    consensusModuleAgent.awaitServicesReplayComplete(stopPosition);
-
-                    logSubscription.close();
-                    logSubscription = null;
-                    logAdapter = null;
-
-                    state = State.DONE;
-                    workCount = 1;
-                }
-            }
+            workCount += consensusModuleAgent.replayLogPoll(logAdapter, stopPosition);
         }
 
         return workCount;
@@ -123,6 +113,24 @@ class LogReplay implements AutoCloseable
 
     boolean isDone()
     {
-        return State.DONE == state;
+        return logAdapter.position() >= stopPosition &&
+            consensusModuleAgent.state() != ConsensusModule.State.SNAPSHOT;
+    }
+
+    long position()
+    {
+        return logAdapter.position();
+    }
+
+    public String toString()
+    {
+        return "LogReplay{" +
+            "startPosition=" + startPosition +
+            ", stopPosition=" + stopPosition +
+            ", replaySessionId=" + replaySessionId +
+            ", logSessionId=" + logSessionId +
+            ", logSubscription=" + logSubscription +
+            ", position=" + position() +
+            '}';
     }
 }

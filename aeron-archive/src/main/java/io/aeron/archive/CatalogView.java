@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,8 +28,12 @@ import io.aeron.archive.codecs.RecordingDescriptorHeaderEncoder;
 /**
  * Read only view of a {@link Catalog} which can be used for listing entries.
  */
-public class CatalogView
+public final class CatalogView
 {
+    private CatalogView()
+    {
+    }
+
     /**
      * List all recording descriptors in a {@link Catalog}.
      *
@@ -74,6 +78,7 @@ public class CatalogView
         }
 
         public void accept(
+            final int recordingDescriptorOffset,
             final RecordingDescriptorHeaderEncoder headerEncoder,
             final RecordingDescriptorHeaderDecoder headerDecoder,
             final RecordingDescriptorEncoder descriptorEncoder,

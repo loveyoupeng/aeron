@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,20 +22,21 @@ import org.agrona.concurrent.UnsafeBuffer;
 
 import java.io.File;
 import java.nio.MappedByteBuffer;
-import java.text.SimpleDateFormat;
-import java.util.Date;
 
 import static io.aeron.CommonContext.AERON_DIR_PROP_DEFAULT;
 import static io.aeron.CommonContext.AERON_DIR_PROP_NAME;
 import static java.lang.System.getProperty;
 
 /**
- * Application that prints a report of loss observed by stream to STDOUT.
+ * Application that prints a report of loss observed by stream to {@link System#out}.
  */
 public class LossStat
 {
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSSZ");
-
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         final String aeronDirectoryName = getProperty(AERON_DIR_PROP_NAME, AERON_DIR_PROP_DEFAULT);
@@ -50,34 +51,8 @@ public class LossStat
         final MappedByteBuffer mappedByteBuffer = SamplesUtil.mapExistingFileReadOnly(lossReportFile);
         final AtomicBuffer buffer = new UnsafeBuffer(mappedByteBuffer);
 
-        System.out.println(
-            "#OBSERVATION_COUNT, TOTAL_BYTES_LOST, FIRST_OBSERVATION," +
-            " LAST_OBSERVATION, SESSION_ID, STREAM_ID, CHANNEL, SOURCE");
-
-        final int entriesRead = LossReportReader.read(buffer, LossStat::accept);
-
-        System.out.println(entriesRead + " entries read");
-    }
-
-    private static void accept(
-        final long observationCount,
-        final long totalBytesLost,
-        final long firstObservationTimestamp,
-        final long lastObservationTimestamp,
-        final int sessionId,
-        final int streamId,
-        final String channel,
-        final String source)
-    {
-        System.out.format(
-            "%d,%d,%s,%s,%d,%d,%s,%s%n",
-            observationCount,
-            totalBytesLost,
-            DATE_FORMAT.format(new Date(firstObservationTimestamp)),
-            DATE_FORMAT.format(new Date(lastObservationTimestamp)),
-            sessionId,
-            streamId,
-            channel,
-            source);
+        System.out.println(LossReportReader.LOSS_REPORT_CSV_HEADER);
+        final int entriesRead = LossReportReader.read(buffer, LossReportReader.defaultEntryConsumer(System.out));
+        System.out.println(entriesRead + " loss entries");
     }
 }

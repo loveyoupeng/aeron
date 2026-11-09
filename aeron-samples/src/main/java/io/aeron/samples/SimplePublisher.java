@@ -1,4 +1,5 @@
 /*
+ * Copyright 2014-2025 Real Logic Limited.
  * Copyright 2015 Kaazing Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,7 +29,13 @@ import java.util.concurrent.TimeUnit;
  */
 public class SimplePublisher
 {
-    public static void main(final String[] args) throws Exception
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws InterruptedException if the thread sleep delay is interrupted.
+     */
+    public static void main(final String[] args) throws InterruptedException
     {
         // Allocate enough buffer size to hold maximum message length
         // The UnsafeBuffer class is part of the Agrona library and is used for efficient buffer management
@@ -48,7 +55,7 @@ public class SimplePublisher
         final Aeron.Context ctx = new Aeron.Context();
 
         // Create an Aeron instance with client-provided context configuration and connect to the
-        // media driver, and create a Publication.  The Aeron and Publication classes implement
+        // media driver, and create a Publication. The Aeron and Publication classes implement
         // AutoCloseable, and will automatically clean up resources when this try block is finished.
         try (Aeron aeron = Aeron.connect(ctx);
             Publication publication = aeron.addPublication(channel, streamId))
@@ -72,27 +79,27 @@ public class SimplePublisher
 
             // Try to publish the buffer. 'offer' is a non-blocking call.
             // If it returns less than 0, the message was not sent, and the offer should be retried.
-            final long result = publication.offer(buffer, 0, messageBytes.length);
+            final long position = publication.offer(buffer, 0, messageBytes.length);
 
-            if (result < 0L)
+            if (position < 0L)
             {
-                if (result == Publication.BACK_PRESSURED)
+                if (position == Publication.BACK_PRESSURED)
                 {
                     System.out.println(" Offer failed due to back pressure");
                 }
-                else if (result == Publication.NOT_CONNECTED)
+                else if (position == Publication.NOT_CONNECTED)
                 {
                     System.out.println(" Offer failed because publisher is not connected to subscriber");
                 }
-                else if (result == Publication.ADMIN_ACTION)
+                else if (position == Publication.ADMIN_ACTION)
                 {
                     System.out.println("Offer failed because of an administration action in the system");
                 }
-                else if (result == Publication.CLOSED)
+                else if (position == Publication.CLOSED)
                 {
                     System.out.println("Offer failed publication is closed");
                 }
-                else if (result == Publication.MAX_POSITION_EXCEEDED)
+                else if (position == Publication.MAX_POSITION_EXCEEDED)
                 {
                     System.out.println("Offer failed due to publication reaching max position");
                 }

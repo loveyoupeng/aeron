@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -32,7 +32,6 @@ import static io.aeron.logbuffer.FrameDescriptor.*;
  * The {@link Header} passed to the delegate on assembling a message will be that of the last fragment.
  *
  * @see Image#controlledPoll(ControlledFragmentHandler, int)
- * @see Image#controlledPeek(long, ControlledFragmentHandler, long)
  */
 public class ImageControlledFragmentAssembler implements ControlledFragmentHandler
 {
@@ -100,45 +99,53 @@ public class ImageControlledFragmentAssembler implements ControlledFragmentHandl
      * @param buffer containing the data.
      * @param offset at which the data begins.
      * @param length of the data in bytes.
-     * @param header representing the meta data for the data.
+     * @param header representing the metadata for the data.
      * @return {@link io.aeron.logbuffer.ControlledFragmentHandler.Action} to be taken after processing fragment.
      */
     public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
-        final byte flags = header.flags();
-
         Action action = Action.CONTINUE;
+        final byte flags = header.flags();
 
         if ((flags & UNFRAGMENTED) == UNFRAGMENTED)
         {
             action = delegate.onFragment(buffer, offset, length, header);
         }
-        else
+        else if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
         {
-            if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
+            builder.reset()
+                .captureHeader(header)
+                .append(buffer, offset, length)
+                .nextTermOffset(header.nextTermOffset());
+        }
+        else if (header.termOffset() == builder.nextTermOffset())
+        {
+            final int limit = builder.limit();
+
+            builder.append(buffer, offset, length);
+
+            if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
             {
-                builder.reset().append(buffer, offset, length);
+                action = delegate.onFragment(
+                    builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
+
+                if (Action.ABORT == action)
+                {
+                    builder.limit(limit);
+                }
+                else
+                {
+                    builder.reset();
+                }
             }
             else
             {
-                final int limit = builder.limit();
-                builder.append(buffer, offset, length);
-
-                if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
-                {
-                    final int msgLength = builder.limit();
-                    action = delegate.onFragment(builder.buffer(), 0, msgLength, header);
-
-                    if (Action.ABORT == action)
-                    {
-                        builder.limit(limit);
-                    }
-                    else
-                    {
-                        builder.reset();
-                    }
-                }
+                builder.nextTermOffset(header.nextTermOffset());
             }
+        }
+        else
+        {
+            builder.reset();
         }
 
         return action;

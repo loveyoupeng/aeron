@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,26 +16,25 @@
 package io.aeron.status;
 
 import io.aeron.Aeron;
-import org.agrona.UnsafeAccess;
 import org.agrona.concurrent.AtomicBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.CountersReader;
 
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
- * Readonly View of an associated {@link io.aeron.Counter}.
+ * Readonly view of an associated {@link io.aeron.Counter}.
  * <p>
  * <b>Note:</b>The user should call {@link #isClosed()} and ensure the result is false to avoid a race on reading a
- * closed counter.
- * */
-public class ReadableCounter implements AutoCloseable
+ * closed {@link io.aeron.Counter}.
+ */
+public final class ReadableCounter implements AutoCloseable
 {
-    private final long addressOffset;
+    private final CountersReader countersReader;
+    private final UnsafeBuffer valueBuffer;
     private final long registrationId;
     private final int counterId;
     private volatile boolean isClosed = false;
-    private final byte[] buffer;
-    private final CountersReader countersReader;
 
     /**
      * Construct a view of an existing counter.
@@ -47,9 +46,10 @@ public class ReadableCounter implements AutoCloseable
      */
     public ReadableCounter(final CountersReader countersReader, final long registrationId, final int counterId)
     {
-        if (countersReader.getCounterState(counterId) != CountersReader.RECORD_ALLOCATED)
+        final int counterState = countersReader.getCounterState(counterId);
+        if (counterState != CountersReader.RECORD_ALLOCATED)
         {
-            throw new IllegalStateException("Counter id has not been allocated: " + counterId);
+            throw new IllegalStateException("Counter not allocated: id=" + counterId + " state=" + counterState);
         }
 
         this.countersReader = countersReader;
@@ -60,8 +60,7 @@ public class ReadableCounter implements AutoCloseable
         final int counterOffset = CountersReader.counterOffset(counterId);
         valuesBuffer.boundsCheck(counterOffset, SIZE_OF_LONG);
 
-        this.buffer = valuesBuffer.byteArray();
-        this.addressOffset = valuesBuffer.addressOffset() + counterOffset;
+        valueBuffer = new UnsafeBuffer(valuesBuffer, counterOffset, SIZE_OF_LONG);
     }
 
     /**
@@ -77,9 +76,9 @@ public class ReadableCounter implements AutoCloseable
     }
 
     /**
-     * Return the registration Id for the counter.
+     * Return the registration id for the counter.
      *
-     * @return registration Id.
+     * @return registration id.
      */
     public long registrationId()
     {
@@ -87,9 +86,9 @@ public class ReadableCounter implements AutoCloseable
     }
 
     /**
-     * Return the counter Id.
+     * Return the counter id.
      *
-     * @return counter Id.
+     * @return counter id.
      */
     public int counterId()
     {
@@ -99,11 +98,10 @@ public class ReadableCounter implements AutoCloseable
     /**
      * Return the state of the counter.
      *
+     * @return state for the counter.
      * @see CountersReader#RECORD_ALLOCATED
      * @see CountersReader#RECORD_RECLAIMED
      * @see CountersReader#RECORD_UNUSED
-     *
-     * @return state for the counter.
      */
     public int state()
     {
@@ -130,17 +128,29 @@ public class ReadableCounter implements AutoCloseable
      */
     public long get()
     {
-        return UnsafeAccess.UNSAFE.getLongVolatile(buffer, addressOffset);
+        return valueBuffer.getLongVolatile(0);
     }
 
     /**
      * Get the value of the counter using weak ordering semantics. This is the same a standard read of a field.
+     * <p>
+     * This call is identical to {@link #getPlain()} and that method is preferred.
      *
      * @return the  value for the counter.
      */
     public long getWeak()
     {
-        return UnsafeAccess.UNSAFE.getLong(buffer, addressOffset);
+        return getPlain();
+    }
+
+    /**
+     * Get the value of the counter using plain memory semantics. This is the same a standard read of a field.
+     *
+     * @return the value for the counter.
+     */
+    public long getPlain()
+    {
+        return valueBuffer.getLong(0);
     }
 
     /**
@@ -152,7 +162,7 @@ public class ReadableCounter implements AutoCloseable
     }
 
     /**
-     * Has this counters been closed and should no longer be used?
+     * Has this counter been closed and should it no longer be used?
      *
      * @return true if it has been closed otherwise false.
      */

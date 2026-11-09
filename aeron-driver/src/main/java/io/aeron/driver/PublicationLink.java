@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,16 @@
 package io.aeron.driver;
 
 /**
- * Tracks a aeron client interest registration in a {@link NetworkPublication} or {@link IpcPublication}.
+ * Tracks an Aeron client interest registration in a {@link NetworkPublication} or {@link IpcPublication}.
  */
-public class PublicationLink implements DriverManagedResource
+final class PublicationLink implements DriverManagedResource
 {
     private final long registrationId;
     private final Object publication;
     private final AeronClient client;
     private boolean reachedEndOfLife = false;
 
-    public PublicationLink(final long registrationId, final AeronClient client, final NetworkPublication publication)
+    PublicationLink(final long registrationId, final AeronClient client, final NetworkPublication publication)
     {
         this.registrationId = registrationId;
         this.client = client;
@@ -34,7 +34,7 @@ public class PublicationLink implements DriverManagedResource
         publication.incRef();
     }
 
-    public PublicationLink(final long registrationId, final AeronClient client, final IpcPublication publication)
+    PublicationLink(final long registrationId, final AeronClient client, final IpcPublication publication)
     {
         this.registrationId = registrationId;
         this.client = client;
@@ -43,6 +43,10 @@ public class PublicationLink implements DriverManagedResource
         publication.incRef();
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
         if (publication instanceof NetworkPublication)
@@ -55,11 +59,22 @@ public class PublicationLink implements DriverManagedResource
         }
     }
 
-    public long registrationId()
+    void revoke()
     {
-        return registrationId;
+        if (publication instanceof NetworkPublication)
+        {
+            ((NetworkPublication)publication).revoke();
+        }
+        else
+        {
+            ((IpcPublication)publication).revoke();
+        }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         if (client.hasTimedOut())
@@ -68,8 +83,17 @@ public class PublicationLink implements DriverManagedResource
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;
+    }
+
+    long registrationId()
+    {
+        return registrationId;
     }
 }

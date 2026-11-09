@@ -1,57 +1,143 @@
 #!/usr/bin/env bash
 
-SOURCE_DIR="`pwd`"
-BUILD_DIR="`pwd`/cppbuild/Release"
+set -euo pipefail
+
+SOURCE_DIR="$(pwd)"
+export BUILD_DIR="${SOURCE_DIR}/cppbuild/Release"
+export BUILD_CONFIG=Release
 EXTRA_CMAKE_ARGS=""
+BUILD_PACKAGE=false
 COVERAGE_BUILD=0
 
+BUILD_DELETE_CMAKE=false
+BUILD_CMAKE_VERSION=4.4.5
+BUILD_CMAKE_DIR="$(dirname "${BUILD_DIR}")/cmake"
+
 ncpus=1
-case "`uname`" in
+case "$(uname)" in
   Darwin* )
-    ncpus=`sysctl -n hw.ncpu`
+    ncpus=$(sysctl -n hw.ncpu)
+    BUILD_CMAKE_OS="macos-universal"
+    BUILD_CMAKE_PATH="${BUILD_CMAKE_DIR}/CMake.app/Contents/bin"
     ;;
   Linux*)
-    ncpus=$(lscpu -p | egrep -v '^#' | wc -l)
+    ncpus=$(lscpu -p | grep -c -E -v '^#')
+    BUILD_CMAKE_OS="linux-$(arch)"
+    BUILD_CMAKE_PATH="${BUILD_CMAKE_DIR}/bin"
     ;;
 esac
 
-for option in "$@"
+function install_cmake()
+{
+  if [[ true = "${BUILD_DELETE_CMAKE}" ]]
+  then
+    echo "Removing old CMake installation"
+    rm -rf "${BUILD_CMAKE_DIR}"
+  fi
+
+  local version_file="${BUILD_CMAKE_DIR}/version.txt"
+  local version_info="${BUILD_CMAKE_VERSION}-${BUILD_CMAKE_OS}"
+  if [[ "${version_info}" != "$(cat "${version_file}")" ]]
+  then
+    echo "Installing CMake ${version_info}"
+    rm -rf "${BUILD_CMAKE_DIR}"
+    mkdir -p "${BUILD_CMAKE_DIR}"
+    (curl -LJ "https://github.com/Kitware/CMake/releases/download/v${BUILD_CMAKE_VERSION}/cmake-${BUILD_CMAKE_VERSION}-${BUILD_CMAKE_OS}.tar.gz" | tar xzf - -C "${BUILD_CMAKE_DIR}" --strip-components 1
+      echo "${version_info}" > "${version_file}")
+  fi
+}
+
+while [[ $# -gt 0 ]]
 do
+  option="${1}"
   case ${option} in
     --c-warnings-as-errors)
-      EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DC_WARNINGS_AS_ERRORS=ON"
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DC_WARNINGS_AS_ERRORS=ON"
       echo "Enabling warnings as errors for c"
       shift
       ;;
     --cxx-warnings-as-errors)
-      EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DCXX_WARNINGS_AS_ERRORS=ON"
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DCXX_WARNINGS_AS_ERRORS=ON"
       echo "Enabling warnings as errors for c++"
       shift
       ;;
+    --cxx-hide-deprecation-message)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DAERON_HIDE_DEPRECATION_MESSAGE=ON"
+      echo "Hiding API deprecation message for c++"
+      shift
+      ;;
     -a|--build-archive-api)
-      EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DBUILD_AERON_ARCHIVE_API=ON"
+      echo "Enabling building of Aeron Archive API is the default"
+      shift
+      ;;
+    --skip-archive-api)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DBUILD_AERON_ARCHIVE_API=OFF"
+      echo "Disabling building of Aeron Archive API"
       shift
       ;;
     -d|--debug-build)
-      EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DCMAKE_BUILD_TYPE=Debug"
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DCMAKE_BUILD_TYPE=Debug"
+      export BUILD_DIR="${SOURCE_DIR}/cppbuild/Debug"
+      export BUILD_CONFIG=Debug
+      echo "Enabling debug build"
+      shift
+      ;;
+    --relwithdebinfo-build)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DCMAKE_BUILD_TYPE=RelWithDebInfo"
+      export BUILD_DIR="${SOURCE_DIR}/cppbuild/RelWithDebInfo"
+      export BUILD_CONFIG=RelWithDebInfo
+      echo "Enabling release with debug info build"
+      shift
+      ;;
+    --compiler-optimization-level)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DAERON_COMPILER_OPTIMIZATION_LEVEL=${2}"
+      echo "Setting compiler optimization level to: -O${2}"
+      shift
       shift
       ;;
     -b|--build-aeron-driver)
-      echo "Enabling building of aeron driver is now the default"
+      echo "Enabling building of Aeron driver is the default"
       shift
       ;;
     --no-parallel)
       ncpus=1
+      echo "Disabling parallel build"
+      shift
+      ;;
+    --parallel-cpus)
+      ncpus=${2}
+      echo "Using ${ncpus} CPUs"
+      shift
+      shift
+      ;;
+    --no-tests)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DAERON_TESTS=OFF"
+      echo "Disabling all tests"
+      shift
+      ;;
+    --no-unit-tests)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DAERON_UNIT_TESTS=OFF"
+      echo "Disabling unit tests"
+      shift
+      ;;
+    --no-system-tests)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DAERON_SYSTEM_TESTS=OFF"
+      echo "Disabling system tests"
+      shift
+      ;;
+    --slow-system-tests)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DAERON_SLOW_SYSTEM_TESTS=ON"
+      echo "Enabling slow system tests"
       shift
       ;;
     --sanitise-build)
-      EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DSANITISE_BUILD=ON"
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DSANITISE_BUILD=ON"
       echo "Enabling sanitise build"
       shift
       ;;
     --coverage-build)
       if (hash lcov 2>/dev/null && hash genhtml 2>/dev/null); then
-        EXTRA_CMAKE_ARGS="$EXTRA_CMAKE_ARGS -DCOVERAGE_BUILD=ON"
+        EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DCOVERAGE_BUILD=ON"
         echo "Enabling coverage build"
         COVERAGE_BUILD=1
       else
@@ -60,35 +146,73 @@ do
       fi
       shift
       ;;
+    --gradle-wrapper)
+      EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DGRADLE_WRAPPER=${2}"
+      echo "Setting -DGRADLE_WRAPPER=${2}"
+      shift
+      shift
+      ;;
+    --package)
+      BUILD_PACKAGE=true
+      shift
+      ;;
+    --rebuild-cmake)
+      BUILD_DELETE_CMAKE=true
+      shift
+      ;;
+    --cmake-version)
+      BUILD_CMAKE_VERSION=${2}
+      echo "Setting BUILD_CMAKE_VERSION=${2}"
+      shift
+      shift
+      ;;
     -h|--help)
-      echo "$0 [--c-warnings-as-errors] [--cxx-warnings-as-errors] [--debug-build] [--build-aeron-driver] [--sanitise-build] [--coverage-build] [--no-parallel]"
+      echo "${0} [--c-warnings-as-errors] [--cxx-warnings-as-errors] [--debug-build] [--relwithdebinfo-build] [--build-aeron-driver] [--build-archive-api] [--sanitise-build] [--coverage-build] [--no-parallel] [--no-system-tests] [--slow-system-tests] [--gradle-wrapper path_to_gradle] [--package] [--rebuild-cmake] [--cmake-version \$cmake_version] [--help]"
       exit
       ;;
     *)
-      echo "Unknown option $option"
+      echo "Unknown option ${option}"
       echo "Use --help for help"
-      exit
+      exit 1
       ;;
   esac
 done
 
-echo "Will make with \"-j $ncpus\"."
+echo "Will make with \"-j ${ncpus}\"."
 
-if [[ -d "$BUILD_DIR" ]] ; then
-  echo "Build directory ($BUILD_DIR) exists, removing."
-  rm -rf ${BUILD_DIR}
+if [[ -d "${BUILD_DIR}" ]] ; then
+  echo "Build directory (${BUILD_DIR}) exists, removing."
+  rm -rf "${BUILD_DIR}"
 fi
 
-mkdir -p ${BUILD_DIR}
+mkdir -p "${BUILD_DIR}"
 
-if [[ "$COVERAGE_BUILD" -eq 1 ]] ; then
-  cd ${BUILD_DIR}
-  cmake -G "Unix Makefiles" ${EXTRA_CMAKE_ARGS} ${SOURCE_DIR} && make clean && make -j "$ncpus" all && ctest -C Release -j "$ncpus"
+install_cmake
+
+if [[ ${COVERAGE_BUILD} -eq 1 ]] ; then
+  cd "${BUILD_DIR}" || exit
+  # shellcheck disable=SC2086
+  "${BUILD_CMAKE_PATH}/cmake" -G "Unix Makefiles" ${EXTRA_CMAKE_ARGS} "${SOURCE_DIR}" && make clean && make -j "${ncpus}" all && "${BUILD_CMAKE_PATH}/ctest" -C ${BUILD_CONFIG} --timeout 2000 --output-on-failure
   rm -rf coverage
   mkdir -p coverage
   lcov --directory . --base-directory . --capture -o coverage/cov.info
   lcov -o coverage/cov.stripped.info --remove coverage/cov.info "/usr/include/*" "*/googletest/*" "*/test/cpp/*" "*/googlemock/*"
   genhtml coverage/cov.stripped.info --demangle-cpp -o coverage
 else
-  (cd ${BUILD_DIR} && cmake -G "CodeBlocks - Unix Makefiles" ${EXTRA_CMAKE_ARGS} ${SOURCE_DIR} && make clean && make -j "$ncpus" all && ctest -C Release --output-on-failure)
+  EXTRA_CMAKE_ARGS="${EXTRA_CMAKE_ARGS} -DDART_TESTING_TIMEOUT=2000"
+
+  cd "${BUILD_DIR}" || exit
+  # shellcheck disable=SC2086
+  "${BUILD_CMAKE_PATH}/cmake" -G "CodeBlocks - Unix Makefiles" ${EXTRA_CMAKE_ARGS} "${SOURCE_DIR}"
+  make clean
+  make -j "${ncpus}" all
+  "${BUILD_CMAKE_PATH}/ctest" -C ${BUILD_CONFIG} --timeout 2000 --output-on-failure
+fi
+
+if [ true = "${BUILD_PACKAGE}" ]
+then
+  (
+    cd "${BUILD_DIR}"
+    make package
+  )
 fi

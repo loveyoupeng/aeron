@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,40 +15,106 @@
  */
 package io.aeron.driver;
 
+import io.aeron.api.InternalApi;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
-import org.agrona.concurrent.status.AtomicCounter;
+import io.aeron.driver.media.ReceiveDestinationTransport;
+import io.aeron.driver.media.SendChannelEndpoint;
+import io.aeron.driver.media.UdpChannel;
+import org.agrona.concurrent.ManyToOneConcurrentLinkedQueue;
 
 import java.net.InetSocketAddress;
-import java.util.Queue;
-
-import static io.aeron.driver.ThreadingMode.INVOKER;
-import static io.aeron.driver.ThreadingMode.SHARED;
 
 /**
  * Proxy for sending commands to the {@link DriverConductor}.
  */
-public class DriverConductorProxy
+@InternalApi
+public final class DriverConductorProxy
 {
-    private final ThreadingMode threadingMode;
-    private final Queue<Runnable> commandQueue;
-    private final AtomicCounter failCount;
-
     private DriverConductor driverConductor;
+    private final ManyToOneConcurrentLinkedQueue<Runnable> commandQueue;
 
-    public DriverConductorProxy(
-        final ThreadingMode threadingMode, final Queue<Runnable> commandQueue, final AtomicCounter failCount)
+    DriverConductorProxy(final ManyToOneConcurrentLinkedQueue<Runnable> commandQueue)
     {
-        this.threadingMode = threadingMode;
         this.commandQueue = commandQueue;
-        this.failCount = failCount;
     }
 
-    public void driverConductor(final DriverConductor driverConductor)
+    /**
+     * Request the conductor re-resolve an endpoint address.
+     *
+     * @param endpoint        in string format.
+     * @param channelEndpoint that the endpoint belongs to.
+     * @param address         of previous resolution.
+     */
+    public void reResolveEndpoint(
+        final String endpoint, final SendChannelEndpoint channelEndpoint, final InetSocketAddress address)
+    {
+        offer(() -> driverConductor.onReResolveEndpoint(endpoint, channelEndpoint, address));
+    }
+
+    /**
+     * Re-resolve a control endpoint for a channel.
+     *
+     * @param endpoint        to be re-resolved.
+     * @param udpChannel      which contained the endpoint.
+     * @param channelEndpoint to which the endpoint belongs.
+     * @param address         of previous resolution.
+     */
+    public void reResolveControl(
+        final String endpoint,
+        final UdpChannel udpChannel,
+        final ReceiveChannelEndpoint channelEndpoint,
+        final InetSocketAddress address)
+    {
+        offer(() -> driverConductor.onReResolveControl(endpoint, udpChannel, channelEndpoint, address));
+    }
+
+    /**
+     * Close a receive destination.
+     *
+     * @param destinationTransport to have its indicators closed.
+     */
+    public void closeReceiveDestination(final ReceiveDestinationTransport destinationTransport)
+    {
+        offer(() -> driverConductor.closeReceiveDestination(destinationTransport));
+    }
+
+    /**
+     * Handle a response setup message from the remote "server".
+     *
+     * @param responseCorrelationId correlationId of the subscription that will handle responses.
+     * @param responseSessionId     sessionId that will be associated with the incoming messages.
+     */
+    public void responseSetup(final long responseCorrelationId, final int responseSessionId)
+    {
+        offer(() -> driverConductor.responseSetup(responseCorrelationId, responseSessionId));
+    }
+
+    /**
+     * Handle notify that a response channel has connected.
+     *
+     * @param responseCorrelationId correlationId of the subscription that will handle responses.
+     */
+    public void responseConnected(final long responseCorrelationId)
+    {
+        offer(() -> driverConductor.responseConnected(responseCorrelationId));
+    }
+
+    void receiveChannelEndpointClosed(final ReceiveChannelEndpoint channelEndpoint)
+    {
+        offer(() -> driverConductor.receiveChannelEndpointClosed(channelEndpoint));
+    }
+
+    void sendChannelEndpointClosed(final SendChannelEndpoint channelEndpoint)
+    {
+        offer(() -> driverConductor.sendChannelEndpointClosed(channelEndpoint));
+    }
+
+    void driverConductor(final DriverConductor driverConductor)
     {
         this.driverConductor = driverConductor;
     }
 
-    public void createPublicationImage(
+    void createPublicationImage(
         final int sessionId,
         final int streamId,
         final int initialTermId,
@@ -57,69 +123,54 @@ public class DriverConductorProxy
         final int termLength,
         final int mtuLength,
         final int transportIndex,
+        final short flags,
         final InetSocketAddress controlAddress,
         final InetSocketAddress srcAddress,
         final ReceiveChannelEndpoint channelEndpoint)
     {
-        if (notConcurrent())
-        {
-            driverConductor.onCreatePublicationImage(
-                sessionId,
-                streamId,
-                initialTermId,
-                activeTermId,
-                termOffset,
-                termLength,
-                mtuLength,
-                transportIndex,
-                controlAddress,
-                srcAddress,
-                channelEndpoint);
-        }
-        else
-        {
-            offer(() -> driverConductor.onCreatePublicationImage(
-                sessionId,
-                streamId,
-                initialTermId,
-                activeTermId,
-                termOffset,
-                termLength,
-                mtuLength,
-                transportIndex,
-                controlAddress,
-                srcAddress,
-                channelEndpoint));
-        }
+        offer(() -> driverConductor.onCreatePublicationImage(
+            sessionId,
+            streamId,
+            initialTermId,
+            activeTermId,
+            termOffset,
+            termLength,
+            mtuLength,
+            transportIndex,
+            flags,
+            controlAddress,
+            srcAddress,
+            channelEndpoint));
     }
 
-    public void channelEndpointError(final long statusIndicatorId, final Exception error)
+    void onPublicationError(
+        final long registrationId,
+        final long destinationRegistrationId,
+        final int sessionId,
+        final int streamId,
+        final long receiverId,
+        final long groupId,
+        final InetSocketAddress srcAddress,
+        final int errorCode,
+        final String errorMessage)
     {
-        if (notConcurrent())
-        {
-            driverConductor.onChannelEndpointError(statusIndicatorId, error);
-        }
-        else
-        {
-            offer(() -> driverConductor.onChannelEndpointError(statusIndicatorId, error));
-        }
-    }
-
-    public boolean notConcurrent()
-    {
-        return threadingMode == SHARED || threadingMode == INVOKER;
+        offer(() -> driverConductor.onPublicationError(
+            registrationId,
+            destinationRegistrationId,
+            sessionId,
+            streamId,
+            receiverId,
+            groupId,
+            srcAddress,
+            errorCode,
+            errorMessage));
     }
 
     private void offer(final Runnable cmd)
     {
-        while (!commandQueue.offer(cmd))
+        if (!commandQueue.offer(cmd))
         {
-            if (Thread.currentThread().isInterrupted())
-            {
-                break;
-            }
-            failCount.increment();
-            Thread.yield();
+            throw new IllegalStateException("offer failed");
         }
     }
 }

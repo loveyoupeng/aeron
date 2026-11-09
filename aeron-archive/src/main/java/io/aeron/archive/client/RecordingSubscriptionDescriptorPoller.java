@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package io.aeron.archive.client;
 import io.aeron.ControlledFragmentAssembler;
 import io.aeron.Subscription;
 import io.aeron.archive.codecs.*;
-import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
@@ -30,23 +29,25 @@ import org.agrona.ErrorHandler;
  * @see ArchiveProxy#listRecordingSubscriptions(int, int, String, int, boolean, long, long)
  * @see AeronArchive#listRecordingSubscriptions(int, int, String, int, boolean, RecordingSubscriptionDescriptorConsumer)
  */
-public class RecordingSubscriptionDescriptorPoller implements ControlledFragmentHandler
+public final class RecordingSubscriptionDescriptorPoller
 {
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final ControlResponseDecoder controlResponseDecoder = new ControlResponseDecoder();
     private final RecordingSubscriptionDescriptorDecoder recordingSubscriptionDescriptorDecoder =
         new RecordingSubscriptionDescriptorDecoder();
+    private final RecordingSignalEventDecoder recordingSignalEventDecoder = new RecordingSignalEventDecoder();
 
     private final long controlSessionId;
     private final int fragmentLimit;
     private final Subscription subscription;
-    private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this);
+    private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this::onFragment);
     private final ErrorHandler errorHandler;
+    private final RecordingSignalConsumer recordingSignalConsumer;
 
     private long correlationId;
     private int remainingSubscriptionCount;
     private boolean isDispatchComplete = false;
-    private RecordingSubscriptionDescriptorConsumer consumer;
+    private RecordingSubscriptionDescriptorConsumer subscriptionDescriptorConsumer;
 
     /**
      * Create a poller for a given subscription to an archive for control response messages.
@@ -62,8 +63,33 @@ public class RecordingSubscriptionDescriptorPoller implements ControlledFragment
         final long controlSessionId,
         final int fragmentLimit)
     {
+        this(
+            subscription,
+            errorHandler,
+            AeronArchive.Configuration.NO_OP_RECORDING_SIGNAL_CONSUMER,
+            controlSessionId,
+            fragmentLimit);
+    }
+
+    /**
+     * Create a poller for a given subscription to an archive for control response messages.
+     *
+     * @param subscription            to poll for new events.
+     * @param errorHandler            to call for asynchronous errors.
+     * @param recordingSignalConsumer for consuming interleaved recording signals on the control session.
+     * @param controlSessionId        to filter the responses.
+     * @param fragmentLimit           to apply for each polling operation.
+     */
+    public RecordingSubscriptionDescriptorPoller(
+        final Subscription subscription,
+        final ErrorHandler errorHandler,
+        final RecordingSignalConsumer recordingSignalConsumer,
+        final long controlSessionId,
+        final int fragmentLimit)
+    {
         this.subscription = subscription;
         this.errorHandler = errorHandler;
+        this.recordingSignalConsumer = recordingSignalConsumer;
         this.fragmentLimit = fragmentLimit;
         this.controlSessionId = controlSessionId;
     }
@@ -79,13 +105,16 @@ public class RecordingSubscriptionDescriptorPoller implements ControlledFragment
     }
 
     /**
-     * Poll for recording recording subscriptions and delegate to the {@link RecordingSubscriptionDescriptorConsumer}.
+     * Poll for recording subscriptions and delegate to the {@link RecordingSubscriptionDescriptorConsumer}.
      *
      * @return the number of fragments read during the operation. Zero if no events are available.
      */
     public int poll()
     {
-        isDispatchComplete = false;
+        if (isDispatchComplete)
+        {
+            isDispatchComplete = false;
+        }
 
         return subscription.controlledPoll(fragmentAssembler, fragmentLimit);
     }
@@ -131,16 +160,18 @@ public class RecordingSubscriptionDescriptorPoller implements ControlledFragment
         final long correlationId, final int subscriptionCount, final RecordingSubscriptionDescriptorConsumer consumer)
     {
         this.correlationId = correlationId;
-        this.consumer = consumer;
+        this.subscriptionDescriptorConsumer = consumer;
         this.remainingSubscriptionCount = subscriptionCount;
         isDispatchComplete = false;
     }
 
-    public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    @SuppressWarnings("MethodLength")
+    ControlledFragmentAssembler.Action onFragment(
+        final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         if (isDispatchComplete)
         {
-            return Action.ABORT;
+            return ControlledFragmentAssembler.Action.ABORT;
         }
 
         messageHeaderDecoder.wrap(buffer, offset);
@@ -164,22 +195,23 @@ public class RecordingSubscriptionDescriptorPoller implements ControlledFragment
                 if (controlResponseDecoder.controlSessionId() == controlSessionId)
                 {
                     final ControlResponseCode code = controlResponseDecoder.code();
-                    final long correlationId = controlResponseDecoder.correlationId();
+                    final long responseCorrelationId = controlResponseDecoder.correlationId();
 
-                    if (ControlResponseCode.SUBSCRIPTION_UNKNOWN == code && correlationId == this.correlationId)
+                    if (ControlResponseCode.SUBSCRIPTION_UNKNOWN == code && responseCorrelationId == correlationId)
                     {
                         isDispatchComplete = true;
-                        return Action.BREAK;
+                        return ControlledFragmentAssembler.Action.BREAK;
                     }
 
                     if (ControlResponseCode.ERROR == code)
                     {
                         final ArchiveException ex = new ArchiveException(
-                            "response for correlationId=" + this.correlationId +
+                            "response for correlationId=" + correlationId +
                             ", error: " + controlResponseDecoder.errorMessage(),
-                            (int)controlResponseDecoder.relevantId());
+                            (int)controlResponseDecoder.relevantId(),
+                            responseCorrelationId);
 
-                        if (correlationId == this.correlationId)
+                        if (responseCorrelationId == correlationId)
                         {
                             throw ex;
                         }
@@ -198,11 +230,10 @@ public class RecordingSubscriptionDescriptorPoller implements ControlledFragment
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
-                final long correlationId = recordingSubscriptionDescriptorDecoder.correlationId();
                 if (recordingSubscriptionDescriptorDecoder.controlSessionId() == controlSessionId &&
-                    correlationId == this.correlationId)
+                    recordingSubscriptionDescriptorDecoder.correlationId() == correlationId)
                 {
-                    consumer.onSubscriptionDescriptor(
+                    subscriptionDescriptorConsumer.onSubscriptionDescriptor(
                         controlSessionId,
                         correlationId,
                         recordingSubscriptionDescriptorDecoder.subscriptionId(),
@@ -212,12 +243,31 @@ public class RecordingSubscriptionDescriptorPoller implements ControlledFragment
                     if (0 == --remainingSubscriptionCount)
                     {
                         isDispatchComplete = true;
-                        return Action.BREAK;
+                        return ControlledFragmentAssembler.Action.BREAK;
                     }
+                }
+                break;
+
+            case RecordingSignalEventDecoder.TEMPLATE_ID:
+                recordingSignalEventDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                if (controlSessionId == recordingSignalEventDecoder.controlSessionId())
+                {
+                    recordingSignalConsumer.onSignal(
+                        recordingSignalEventDecoder.controlSessionId(),
+                        recordingSignalEventDecoder.correlationId(),
+                        recordingSignalEventDecoder.recordingId(),
+                        recordingSignalEventDecoder.subscriptionId(),
+                        recordingSignalEventDecoder.position(),
+                        recordingSignalEventDecoder.signal());
                 }
                 break;
         }
 
-        return Action.CONTINUE;
+        return ControlledFragmentAssembler.Action.CONTINUE;
     }
 }

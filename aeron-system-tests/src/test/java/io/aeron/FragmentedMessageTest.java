@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,58 +20,76 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.logbuffer.LogBufferDescriptor;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Test;
-import org.junit.experimental.theories.DataPoint;
-import org.junit.experimental.theories.Theories;
-import org.junit.experimental.theories.Theory;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 
-import static io.aeron.logbuffer.FrameDescriptor.END_FRAG_FLAG;
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
+import java.util.List;
+
+import static io.aeron.logbuffer.FrameDescriptor.UNFRAGMENTED;
+import static java.util.Arrays.asList;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.*;
 
-@RunWith(Theories.class)
-public class FragmentedMessageTest
+@ExtendWith(InterruptingTestCallback.class)
+class FragmentedMessageTest
 {
-    @DataPoint
-    public static final String IPC_CHANNEL = CommonContext.IPC_CHANNEL;
+    private static List<String> channels()
+    {
+        return asList(
+            CommonContext.IPC_CHANNEL,
+            "aeron:udp?endpoint=localhost:24325",
+            "aeron:udp?endpoint=224.20.30.39:24326|interface=localhost");
+    }
 
-    @DataPoint
-    public static final String UNICAST_CHANNEL = "aeron:udp?endpoint=localhost:54325";
-
-    @DataPoint
-    public static final String MULTICAST_CHANNEL = "aeron:udp?endpoint=224.20.30.39:54326|interface=localhost";
-
-    private static final int STREAM_ID = 1;
+    private static final int STREAM_ID = 1001;
     private static final int FRAGMENT_COUNT_LIMIT = 10;
+
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
     private final FragmentHandler mockFragmentHandler = mock(FragmentHandler.class);
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
+    private final MediaDriver.Context driverContext = new MediaDriver.Context()
         .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnShutdown(true)
-        .threadingMode(ThreadingMode.SHARED));
+        .errorHandler(Tests::onError)
+        .threadingMode(ThreadingMode.SHARED);
 
-    private final Aeron aeron = Aeron.connect();
+    private TestMediaDriver driver;
 
-    @After
-    public void after()
+    private Aeron aeron;
+
+    @BeforeEach
+    void setUp()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        driver = TestMediaDriver.launch(driverContext, testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
     }
 
-    @Theory
-    @Test(timeout = 10_000)
-    public void shouldReceivePublishedMessage(final String channel)
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @ParameterizedTest
+    @MethodSource("channels")
+    @InterruptAfter(10)
+    void shouldReceivePublishedMessage(final String channel)
     {
         final FragmentAssembler assembler = new FragmentAssembler(mockFragmentHandler);
 
@@ -89,23 +107,21 @@ public class FragmentedMessageTest
 
             while (publication.offer(srcBuffer, offset, srcBuffer.capacity()) < 0L)
             {
-                Thread.yield();
-                SystemTest.checkInterruptedStatus();
+                Tests.yield();
             }
 
             final int expectedFragmentsBecauseOfHeader = 5;
-            int numFragments = 0;
+            int fragmentCount = 0;
             do
             {
                 final int fragments = subscription.poll(assembler, FRAGMENT_COUNT_LIMIT);
                 if (0 == fragments)
                 {
-                    Thread.yield();
-                    SystemTest.checkInterruptedStatus();
+                    Tests.yield();
                 }
-                numFragments += fragments;
+                fragmentCount += fragments;
             }
-            while (numFragments < expectedFragmentsBecauseOfHeader);
+            while (fragmentCount < expectedFragmentsBecauseOfHeader);
 
             final ArgumentCaptor<DirectBuffer> bufferArg = ArgumentCaptor.forClass(DirectBuffer.class);
             final ArgumentCaptor<Header> headerArg = ArgumentCaptor.forClass(Header.class);
@@ -116,10 +132,10 @@ public class FragmentedMessageTest
             final DirectBuffer capturedBuffer = bufferArg.getValue();
             for (int i = 0; i < srcBuffer.capacity(); i++)
             {
-                assertThat("same at i=" + i, capturedBuffer.getByte(i), is(srcBuffer.getByte(i)));
+                assertEquals(srcBuffer.getByte(i), capturedBuffer.getByte(i), "same at i=" + i);
             }
 
-            assertThat(headerArg.getValue().flags(), is(END_FRAG_FLAG));
+            assertEquals(UNFRAGMENTED, headerArg.getValue().flags());
         }
     }
 }

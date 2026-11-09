@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,10 +22,13 @@ import java.net.InetSocketAddress;
  */
 public interface CongestionControl extends AutoCloseable
 {
+    /**
+     * Bit flag for if a status message should be forced out.
+     */
     int FORCE_STATUS_MESSAGE_BIT = 0x1;
 
     /**
-     * Pack values into a long so they can be returned on the stack without allocation.
+     * Pack values into a long, so they can be returned on the stack without allocation.
      *
      * @param receiverWindowLength to go in the lower bits.
      * @param forceStatusMessage   to go in the higher bits.
@@ -46,7 +49,7 @@ public interface CongestionControl extends AutoCloseable
      */
     static int receiverWindowLength(final long outcome)
     {
-        return (int)outcome;
+        return (int)(outcome & 0xFFFFFFFFL);
     }
 
     /**
@@ -96,7 +99,7 @@ public interface CongestionControl extends AutoCloseable
     void onRttMeasurement(long nowNs, long rttNs, InetSocketAddress srcAddress);
 
     /**
-     * Called by {@link DriverConductor} upon execution of {@link PublicationImage#trackRebuild(long, long)} to
+     * Called by {@link DriverConductor} upon execution of {@link PublicationImage#trackRebuild(long)} to
      * pass on current status.
      * <p>
      * The return value must be packed using {@link CongestionControl#packOutcome(int, boolean)}.
@@ -122,9 +125,20 @@ public interface CongestionControl extends AutoCloseable
     /**
      * Called by {@link DriverConductor} to initialise window length for a new {@link PublicationImage}.
      *
-     * @return new image window length
+     * @return initial window length for flow and congestion control.
      */
     int initialWindowLength();
 
+    /**
+     * Called by {@link DriverConductor} limit the window length for a new {@link PublicationImage}.
+     *
+     * @return maximum window length for flow and congestion control.
+     */
+    int maxWindowLength();
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     void close();
 }

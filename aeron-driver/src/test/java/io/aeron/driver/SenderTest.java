@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,21 +23,21 @@ import io.aeron.driver.media.UdpChannel;
 import io.aeron.driver.status.SystemCounters;
 import io.aeron.logbuffer.HeaderWriter;
 import io.aeron.logbuffer.LogBufferDescriptor;
-import io.aeron.logbuffer.TermAppender;
 import io.aeron.protocol.DataHeaderFlyweight;
 import io.aeron.protocol.HeaderFlyweight;
 import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
+import org.agrona.DirectBuffer;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.CachedEpochClock;
 import org.agrona.concurrent.CachedNanoClock;
 import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.AtomicLongPosition;
-import org.agrona.concurrent.status.Position;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.stubbing.Answer;
 
 import java.net.InetSocketAddress;
@@ -46,19 +46,26 @@ import java.util.ArrayDeque;
 import java.util.Queue;
 
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
-import static io.aeron.logbuffer.LogBufferDescriptor.PARTITION_COUNT;
+import static io.aeron.logbuffer.FrameDescriptor.frameLengthOrdered;
+import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 import static org.agrona.BitUtil.align;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.core.Is.is;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.when;
 
-public class SenderTest
+class SenderTest
 {
     private static final int TERM_BUFFER_LENGTH = LogBufferDescriptor.TERM_MIN_LENGTH;
     private static final int MAX_FRAME_LENGTH = 1024;
     private static final int SESSION_ID = 1;
-    private static final int STREAM_ID = 2;
+    private static final int STREAM_ID = 1002;
     private static final int INITIAL_TERM_ID = 3;
     private static final byte[] PAYLOAD = "Payload is here!".getBytes();
 
@@ -70,13 +77,12 @@ public class SenderTest
     private final ControlTransportPoller mockTransportPoller = mock(ControlTransportPoller.class);
 
     private final RawLog rawLog = TestLogFactory.newLogBuffers(TERM_BUFFER_LENGTH);
-
-    private TermAppender[] termAppenders;
     private NetworkPublication publication;
     private Sender sender;
 
     private final FlowControl flowControl = spy(new UnicastFlowControl());
     private final RetransmitHandler mockRetransmitHandler = mock(RetransmitHandler.class);
+    private final DriverConductorProxy mockDriverConductorProxy = mock(DriverConductorProxy.class);
 
     private final CachedNanoClock nanoClock = new CachedNanoClock();
 
@@ -105,30 +111,30 @@ public class SenderTest
             return length;
         };
 
-    @Before
-    public void setUp()
+    private final ErrorHandler errorHandler = mock(ErrorHandler.class);
+
+    @BeforeEach
+    void setUp()
     {
         final SendChannelEndpoint mockSendChannelEndpoint = mock(SendChannelEndpoint.class);
         when(mockSendChannelEndpoint.udpChannel()).thenReturn(udpChannel);
         when(mockSendChannelEndpoint.send(any())).thenAnswer(saveByteBufferAnswer);
         when(mockSystemCounters.get(any())).thenReturn(mock(AtomicCounter.class));
 
-        sender = new Sender(
-            new MediaDriver.Context()
-                .cachedEpochClock(new CachedEpochClock())
-                .cachedNanoClock(nanoClock)
-                .controlTransportPoller(mockTransportPoller)
-                .systemCounters(mockSystemCounters)
-                .senderCommandQueue(senderCommandQueue)
-                .nanoClock(nanoClock));
+        final MediaDriver.Context ctx = new MediaDriver.Context()
+            .cachedEpochClock(new CachedEpochClock())
+            .cachedNanoClock(nanoClock)
+            .senderCachedNanoClock(nanoClock)
+            .receiverCachedNanoClock(nanoClock)
+            .controlTransportPoller(mockTransportPoller)
+            .systemCounters(mockSystemCounters)
+            .senderCommandQueue(senderCommandQueue)
+            .nanoClock(nanoClock)
+            .errorHandler(errorHandler)
+            .senderDutyCycleTracker(new DutyCycleTracker());
+        sender = new Sender(ctx);
 
         LogBufferDescriptor.initialiseTailWithTermId(rawLog.metaData(), 0, INITIAL_TERM_ID);
-
-        termAppenders = new TermAppender[PARTITION_COUNT];
-        for (int i = 0; i < PARTITION_COUNT; i++)
-        {
-            termAppenders[i] = new TermAppender(rawLog.termBuffers()[i], rawLog.metaData(), i);
-        }
 
         final PublicationParams params = new PublicationParams();
         params.entityTag = 101;
@@ -138,41 +144,38 @@ public class SenderTest
 
         publication = new NetworkPublication(
             1,
+            ctx,
             params,
             mockSendChannelEndpoint,
-            nanoClock,
             rawLog,
             Configuration.producerWindowLength(TERM_BUFFER_LENGTH, Configuration.publicationTermWindowLength()),
-            mock(Position.class),
-            mock(Position.class),
             new AtomicLongPosition(),
             new AtomicLongPosition(),
+            new AtomicLongPosition(),
+            new AtomicLongPosition(),
+            mock(AtomicCounter.class),
             mock(AtomicCounter.class),
             SESSION_ID,
             STREAM_ID,
             INITIAL_TERM_ID,
-            mockSystemCounters,
             flowControl,
             mockRetransmitHandler,
             new NetworkPublicationThreadLocals(),
-            Configuration.publicationUnblockTimeoutNs(),
-            Configuration.publicationConnectionTimeoutNs(),
-            Configuration.untetheredWindowLimitTimeoutNs(),
-            Configuration.untetheredRestingTimeoutNs(),
-            false,
             false);
 
-        senderCommandQueue.offer(() -> sender.onNewNetworkPublication(publication));
+        assertTrue(senderCommandQueue.offer(() -> sender.onNewNetworkPublication(publication)));
+
+        sender.doWork(); // process command
     }
 
-    @After
-    public void tearDown()
+    @AfterEach
+    void tearDown()
     {
         sender.onClose();
     }
 
     @Test
-    public void shouldSendSetupFrameOnChannelWhenTimeoutWithoutStatusMessage()
+    void shouldSendSetupFrameOnChannelWhenTimeoutWithoutStatusMessage()
     {
         sender.doWork();
         assertThat(receivedFrames.size(), is(1));
@@ -196,7 +199,7 @@ public class SenderTest
     }
 
     @Test
-    public void shouldSendMultipleSetupFramesOnChannelWhenTimeoutWithoutStatusMessage()
+    void shouldSendMultipleSetupFramesOnChannelWhenTimeoutWithoutStatusMessage()
     {
         sender.doWork();
         assertThat(receivedFrames.size(), is(1));
@@ -211,18 +214,20 @@ public class SenderTest
     }
 
     @Test
-    public void shouldNotSendSetupFrameAfterReceivingStatusMessage()
+    void shouldNotSendSetupFrameOnlyOnceAfterReceivingStatusMessage()
     {
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(0);
 
-        publication.onStatusMessage(msg, rcvAddress);
-//        publication.senderPositionLimit(flowControl.onStatusMessage(msg, rcvAddress, ));
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
         sender.doWork();
+
         assertThat(receivedFrames.size(), is(1));
-        receivedFrames.remove();
+        dataHeader.wrap(receivedFrames.remove());
+        assertThat(dataHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_DATA)); // heartbeat
+        assertThat(dataHeader.frameLength(), is(0));
 
         nanoClock.advance(Configuration.PUBLICATION_SETUP_TIMEOUT_NS + 10);
         sender.doWork();
@@ -230,31 +235,34 @@ public class SenderTest
         assertThat(receivedFrames.size(), is(1));
         dataHeader.wrap(receivedFrames.remove());
         assertThat(dataHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_DATA)); // heartbeat
-        assertThat(dataHeader.frameLength(), is(0));
         assertThat(dataHeader.termOffset(), is(offsetOfMessage(1)));
     }
 
     @Test
-    public void shouldSendSetupFrameAfterReceivingStatusMessageWithSetupBit()
+    void shouldSendSetupFrameAfterReceivingStatusMessageWithSetupBit()
     {
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        sender.doWork();
+
+        assertThat(receivedFrames.size(), is(1)); // setup frame
+        receivedFrames.remove();
+
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
 
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
         sender.doWork();
 
-        assertThat(receivedFrames.size(), is(2)); // setup then data
-        receivedFrames.remove();
+        assertThat(receivedFrames.size(), is(1)); // data
         receivedFrames.remove();
 
-        publication.triggerSendSetupFrame();
+        publication.triggerSendSetupFrame(msg, rcvAddress);
 
         sender.doWork();
         assertThat(receivedFrames.size(), is(0)); // setup has been sent already, have to wait
@@ -262,31 +270,60 @@ public class SenderTest
         nanoClock.advance(Configuration.PUBLICATION_SETUP_TIMEOUT_NS + 10);
         sender.doWork();
 
-        assertThat(receivedFrames.size(), is(1));
+        assertThat(receivedFrames.size(), is(2));
 
         setupHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
         assertThat(setupHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_SETUP));
+        dataHeader.wrap(receivedFrames.remove());
+        assertThat(dataHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_DATA));
+        assertThat(dataHeader.frameLength(), is(0));
     }
 
     @Test
-    public void shouldBeAbleToSendOnChannel()
+    void shouldSendHeartbeatsEvenIfSendingPeriodicSetupFrames()
     {
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
+
+        sender.doWork();
+
+        assertThat(receivedFrames.size(), is(1)); // heartbeat
+        receivedFrames.remove();
+
+        publication.triggerSendSetupFrame(msg, rcvAddress);
+        nanoClock.advance(Configuration.PUBLICATION_SETUP_TIMEOUT_NS + 10);
+        sender.doWork();
+
+        assertThat(receivedFrames.size(), is(2));
+
+        setupHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
+        assertThat(setupHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_SETUP));
+        dataHeader.wrap(receivedFrames.remove());
+        assertThat(dataHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_DATA)); // heartbeat is sent after setup
+        assertThat(dataHeader.frameLength(), is(0));
+    }
+
+    @Test
+    void shouldBeAbleToSendOnChannel()
+    {
+        final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
+        when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
+        when(msg.consumptionTermOffset()).thenReturn(0);
+        when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
+
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
 
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
         sender.doWork();
 
-        assertThat(receivedFrames.size(), is(2));
-        setupHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
-        assertThat(setupHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_SETUP));
+        assertThat(receivedFrames.size(), is(1));
 
         dataHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
         assertThat(dataHeader.frameLength(), is(FRAME_LENGTH));
@@ -300,27 +337,28 @@ public class SenderTest
     }
 
     @Test
-    public void shouldBeAbleToSendOnChannelTwice()
+    void shouldBeAbleToSendOnChannelTwice()
     {
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(2 * ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
 
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
-        sender.doWork();
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        final int offset = appendUnfragmentedMessage(
+            rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
+
         sender.doWork();
 
-        assertThat(receivedFrames.size(), is(3));
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, offset, headerWriter, buffer, 0, PAYLOAD.length);
 
-        setupHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
-        assertThat(setupHeader.headerType(), is(HeaderFlyweight.HDR_TYPE_SETUP));
+        sender.doWork();
+
+        assertThat(receivedFrames.size(), is(2));
 
         dataHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
         assertThat(dataHeader.frameLength(), is(FRAME_LENGTH));
@@ -344,11 +382,11 @@ public class SenderTest
     }
 
     @Test
-    public void shouldNotSendUntilStatusMessageReceived()
+    void shouldNotSendUntilStatusMessageReceived()
     {
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
 
         sender.doWork();
         assertThat(receivedFrames.size(), is(1));
@@ -360,7 +398,7 @@ public class SenderTest
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
         sender.doWork();
 
         assertThat(receivedFrames.size(), is(1));
@@ -378,23 +416,22 @@ public class SenderTest
     }
 
     @Test
-    public void shouldNotBeAbleToSendAfterUsingUpYourWindow()
+    void shouldNotBeAbleToSendAfterUsingUpYourWindow()
     {
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
 
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         sender.doWork();
 
-        assertThat(receivedFrames.size(), is(2));
-        receivedFrames.remove();                   // skip setup
+        assertThat(receivedFrames.size(), is(1));
 
         dataHeader.wrap(new UnsafeBuffer(receivedFrames.remove()));
         assertThat(dataHeader.frameLength(), is(FRAME_LENGTH));
@@ -406,31 +443,32 @@ public class SenderTest
         assertThat(dataHeader.flags(), is(DataHeaderFlyweight.BEGIN_AND_END_FLAGS));
         assertThat(dataHeader.version(), is((short)HeaderFlyweight.CURRENT_VERSION));
 
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
+
         sender.doWork();
 
         assertThat(receivedFrames.size(), is(0));
     }
 
     @Test
-    public void shouldSendLastDataFrameAsHeartbeatWhenIdle()
+    void shouldSendLastDataFrameAsHeartbeatWhenIdle()
     {
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
 
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
+
         sender.doWork();
 
-        assertThat(receivedFrames.size(), is(2));  // should send ticks
-        receivedFrames.remove();                   // skip setup & data frame
-        receivedFrames.remove();
+        assertThat(receivedFrames.size(), is(1));  // should send ticks
+        receivedFrames.remove();                   // skip data frame
 
         nanoClock.advance(Configuration.PUBLICATION_HEARTBEAT_TIMEOUT_NS - 1);
         sender.doWork();
@@ -447,31 +485,31 @@ public class SenderTest
     }
 
     @Test
-    public void shouldSendMultipleDataFramesAsHeartbeatsWhenIdle()
+    void shouldSendMultipleDataFramesAsHeartbeatsWhenIdle()
     {
         final StatusMessageFlyweight msg = mock(StatusMessageFlyweight.class);
         when(msg.consumptionTermId()).thenReturn(INITIAL_TERM_ID);
         when(msg.consumptionTermOffset()).thenReturn(0);
         when(msg.receiverWindowLength()).thenReturn(ALIGNED_FRAME_LENGTH);
 
-        publication.onStatusMessage(msg, rcvAddress);
+        publication.onStatusMessage(msg, rcvAddress, mockDriverConductorProxy);
 
         final UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(PAYLOAD.length));
         buffer.putBytes(0, PAYLOAD);
 
-        termAppenders[0].appendUnfragmentedMessage(headerWriter, buffer, 0, PAYLOAD.length, null, INITIAL_TERM_ID);
-        sender.doWork();
+        appendUnfragmentedMessage(rawLog, 0, INITIAL_TERM_ID, 0, headerWriter, buffer, 0, PAYLOAD.length);
 
-        assertThat(receivedFrames.size(), is(2));  // should send ticks
-        receivedFrames.remove();
-        receivedFrames.remove();                   // skip setup & data frame
+        assertNotEquals(0, sender.doWork());
+
+        assertThat(receivedFrames.size(), is(1));  // should send ticks
+        receivedFrames.remove();                   // skip data (heartbeat) frame
 
         nanoClock.advance(Configuration.PUBLICATION_HEARTBEAT_TIMEOUT_NS - 1);
-        sender.doWork();
+        assertEquals(1, sender.doWork());
         assertThat(receivedFrames.size(), is(0));  // should not send yet
 
         nanoClock.advance(10);
-        sender.doWork();
+        assertNotEquals(0, sender.doWork());
         assertThat(receivedFrames.size(), greaterThanOrEqualTo(1));  // should send ticks
 
         dataHeader.wrap(receivedFrames.remove());
@@ -479,11 +517,11 @@ public class SenderTest
         assertThat(dataHeader.termOffset(), is(offsetOfMessage(2)));
 
         nanoClock.advance(Configuration.PUBLICATION_HEARTBEAT_TIMEOUT_NS - 1);
-        sender.doWork();
+        assertEquals(0, sender.doWork());
         assertThat(receivedFrames.size(), is(0));  // should not send yet
 
         nanoClock.advance(10);
-        sender.doWork();
+        assertNotEquals(0, sender.doWork());
         assertThat(receivedFrames.size(), greaterThanOrEqualTo(1));  // should send ticks
 
         dataHeader.wrap(receivedFrames.remove());
@@ -494,5 +532,31 @@ public class SenderTest
     private int offsetOfMessage(final int offset)
     {
         return (offset - 1) * align(HEADER.capacity() + PAYLOAD.length, FRAME_ALIGNMENT);
+    }
+
+    private int appendUnfragmentedMessage(
+        final RawLog rawLog,
+        final int partitionIndex,
+        final int termId,
+        final int termOffset,
+        final HeaderWriter header,
+        final DirectBuffer srcBuffer,
+        final int srcOffset,
+        final int length)
+    {
+        final UnsafeBuffer termBuffer = rawLog.termBuffers()[partitionIndex];
+        final int frameLength = length + HEADER_LENGTH;
+        final int alignedLength = align(frameLength, FRAME_ALIGNMENT);
+        final int resultingOffset = termOffset + alignedLength;
+        final long rawTail = LogBufferDescriptor.packTail(termId, resultingOffset);
+
+        LogBufferDescriptor.rawTail(rawLog.metaData(), partitionIndex, rawTail);
+
+        header.write(termBuffer, termOffset, frameLength, termId);
+        termBuffer.putBytes(termOffset + HEADER_LENGTH, srcBuffer, srcOffset, length);
+
+        frameLengthOrdered(termBuffer, termOffset, frameLength);
+
+        return resultingOffset;
     }
 }

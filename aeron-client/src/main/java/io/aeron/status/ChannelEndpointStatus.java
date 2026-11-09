@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,8 +27,12 @@ import static org.agrona.concurrent.status.CountersReader.MAX_LABEL_LENGTH;
 /**
  * Status of the Aeron media channel for a {@link io.aeron.Publication} or {@link io.aeron.Subscription}.
  */
-public class ChannelEndpointStatus
+public final class ChannelEndpointStatus
 {
+    private ChannelEndpointStatus()
+    {
+    }
+
     /**
      * Channel is being initialized.
      */
@@ -55,7 +59,7 @@ public class ChannelEndpointStatus
     public static final int NO_ID_ALLOCATED = Aeron.NULL_VALUE;
 
     /**
-     * Offset in the key meta data for the channel of the counter.
+     * Offset in the key metadata for the channel of the counter.
      */
     public static final int CHANNEL_OFFSET = 0;
 
@@ -101,7 +105,8 @@ public class ChannelEndpointStatus
      * @param tempBuffer      to be used for labels and metadata.
      * @param name            of the counter for the label.
      * @param typeId          of the counter for classification.
-     * @param countersManager from which to allocated the underlying storage.
+     * @param countersManager from which the underlying storage is allocated.
+     * @param registrationId  of the action the counter is associated with.
      * @param channel         for the stream of messages.
      * @return a new {@link AtomicCounter} for tracking the status.
      */
@@ -110,11 +115,14 @@ public class ChannelEndpointStatus
         final String name,
         final int typeId,
         final CountersManager countersManager,
+        final long registrationId,
         final String channel)
     {
-        final int keyLength = tempBuffer.putStringWithoutLengthAscii(
+        final int channelLength = tempBuffer.putStringWithoutLengthAscii(
             CHANNEL_OFFSET + SIZE_OF_INT, channel, 0, MAX_CHANNEL_LENGTH);
-        tempBuffer.putInt(CHANNEL_OFFSET, keyLength);
+        tempBuffer.putInt(CHANNEL_OFFSET, channelLength);
+
+        final int keyLength = channelLength + SIZE_OF_INT;
 
         int labelLength = 0;
         labelLength += tempBuffer.putStringWithoutLengthAscii(keyLength + labelLength, name);
@@ -128,6 +136,11 @@ public class ChannelEndpointStatus
             labelLength += 1;
         }
 
-        return countersManager.newCounter(typeId, tempBuffer, 0, keyLength, tempBuffer, keyLength, labelLength);
+        final AtomicCounter counter = countersManager.newCounter(
+            typeId, tempBuffer, 0, keyLength, tempBuffer, keyLength, labelLength);
+
+        countersManager.setCounterRegistrationId(counter.id(), registrationId);
+
+        return counter;
     }
 }

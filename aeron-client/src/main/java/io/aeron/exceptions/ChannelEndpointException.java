@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,25 @@
  */
 package io.aeron.exceptions;
 
+/**
+ * Indicates an error occurred when setting up the channel for either a {@link io.aeron.Publication} or
+ * {@link io.aeron.Subscription}.
+ */
 public class ChannelEndpointException extends AeronException
 {
+    private static final long serialVersionUID = 6810249167217382358L;
+
+    /**
+     * Counter id for the status indicator of the channel.
+     */
     private final int statusIndicatorId;
 
+    /**
+     * Construct an exception with a given status indicator counter id and detail message.
+     *
+     * @param statusIndicatorId counter id for the channel.
+     * @param message           for the exception.
+     */
     public ChannelEndpointException(final int statusIndicatorId, final String message)
     {
         super(message);

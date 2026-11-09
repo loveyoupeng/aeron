@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@
  */
 package io.aeron.command;
 
-import io.aeron.ErrorCode;
 import io.aeron.exceptions.ControlProtocolException;
+import org.agrona.MutableDirectBuffer;
 
+import static io.aeron.ErrorCode.MALFORMED_COMMAND;
 import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
@@ -27,6 +28,9 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  *   0                   1                   2                   3
  *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |                          Client ID                            |
+ *  |                                                               |
+ *  +---------------------------------------------------------------+
  *  |                       Correlation ID                          |
  *  |                                                               |
  *  +---------------------------------------------------------------+
@@ -43,15 +47,37 @@ public class PublicationMessageFlyweight extends CorrelatedMessageFlyweight
 {
     private static final int STREAM_ID_FIELD_OFFSET = CORRELATION_ID_FIELD_OFFSET + SIZE_OF_LONG;
     private static final int CHANNEL_OFFSET = STREAM_ID_FIELD_OFFSET + SIZE_OF_INT;
-
     private static final int MINIMUM_LENGTH = CHANNEL_OFFSET + SIZE_OF_INT;
 
     private int lengthOfChannel;
 
     /**
-     * Get the stream id field
+     * An empty flyweight, which should be wrapped over a buffer.
      *
-     * @return stream id field
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public PublicationMessageFlyweight()
+    {
+    }
+
+    /**
+     * Wrap the buffer at a given offset for updates.
+     *
+     * @param buffer to wrap.
+     * @param offset at which the message begins.
+     * @return this for a fluent API.
+     */
+    public PublicationMessageFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
+    {
+        super.wrap(buffer, offset);
+
+        return this;
+    }
+
+    /**
+     * Get the stream id field.
+     *
+     * @return stream id field.
      */
     public int streamId()
     {
@@ -59,10 +85,10 @@ public class PublicationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Set the stream id field
+     * Set the stream id field.
      *
-     * @param streamId field value
-     * @return flyweight
+     * @param streamId field value.
+     * @return this for a fluent API.
      */
     public PublicationMessageFlyweight streamId(final int streamId)
     {
@@ -72,9 +98,9 @@ public class PublicationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Get the channel field in ASCII
+     * Get the channel field in ASCII.
      *
-     * @return channel field
+     * @return channel field.
      */
     public String channel()
     {
@@ -92,10 +118,10 @@ public class PublicationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Set the channel field in ASCII
+     * Set the channel field in ASCII.
      *
-     * @param channel field value
-     * @return flyweight
+     * @param channel field value.
+     * @return this for a fluent API.
      */
     public PublicationMessageFlyweight channel(final String channel)
     {
@@ -105,11 +131,11 @@ public class PublicationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Get the length of the current message
+     * Get the length of the current message.
      * <p>
      * NB: must be called after the data is written in order to be accurate.
      *
-     * @return the length of the current message
+     * @return the length of the current message.
      */
     public int length()
     {
@@ -127,13 +153,24 @@ public class PublicationMessageFlyweight extends CorrelatedMessageFlyweight
         if (length < MINIMUM_LENGTH)
         {
             throw new ControlProtocolException(
-                ErrorCode.MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
+                MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
         }
 
         if ((length - MINIMUM_LENGTH) < buffer.getInt(offset + CHANNEL_OFFSET))
         {
             throw new ControlProtocolException(
-                ErrorCode.MALFORMED_COMMAND, "command=" + msgTypeId + " too short for channel: length=" + length);
+                MALFORMED_COMMAND, "command=" + msgTypeId + " too short for channel: length=" + length);
         }
+    }
+
+    /**
+     * Compute the length of the command message for a given channel length.
+     *
+     * @param channelLength to be appended to the header.
+     * @return the length of the command message for a given channel length.
+     */
+    public static int computeLength(final int channelLength)
+    {
+        return MINIMUM_LENGTH + channelLength;
     }
 }

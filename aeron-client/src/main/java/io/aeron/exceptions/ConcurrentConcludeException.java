@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,4 +21,12 @@ package io.aeron.exceptions;
  */
 public class ConcurrentConcludeException extends AeronException
 {
+    /**
+     * Create a default ConcurrentConcludeException.
+     */
+    public ConcurrentConcludeException()
+    {
+    }
+
+    private static final long serialVersionUID = 684839776662091577L;
 }

@@ -3,8 +3,9 @@ GTAGS
 GRTAGS
 GPATH
 prop
-out
-classes
+out/
+classes/
+bin/
 
 # OS X
 .DS_Store
@@ -18,7 +19,8 @@ classes
 *.iml
 *.ipr
 *.iws
-.idea
+.idea/
+.run/
 
 # editors
 *.sublime-project
@@ -27,10 +29,14 @@ classes
 
 # the build
 build-local.properties
-.gradle
-build
-cmake-build-debug
-cmake-build-release
+.gradle/
+build/
+!buildSrc/
+!buildSrc/src/**/build
+cmake-build-debug/
+cmake-build-release/
+cmake-build-debug-*/
+cmake-build-release-*/
 
 # cpp build linux
 cppbuild/CMakeCache.txt
@@ -42,6 +48,8 @@ cppbuild/aeron-common/
 cppbuild/aeron-samples/
 cppbuild/binaries/
 cppbuild/cmake_install.cmake
+cppbuild/cmake/
+cppbuild/cmake*/
 
 # cpp build windows
 cppbuild/*.opensdf
@@ -56,14 +64,18 @@ cppbuild/*.log
 cppbuild/*.cache
 cppbuild/Debug
 cppbuild/Release
+cppbuild/RelWithDebInfo
 cppbuild/Win32
 
 # JVM crash reports
 hs_err_pid*
+*.hprof
+*-gc.log
+*-crash.log
 
 # Archive and Cluster data from system tests
-/aeron-archive/*.rec
-/aeron-archive/*.catalog
-/aeron-archive/*.dat
-/aeron-cluster/*.dat
-/aeron-cluster/recording.log
+/aeron-cluster/aeron-archive/
+/aeron-cluster/aeron-cluster/
+
+aeron-samples/scripts/cluster/logs/
+aeron-samples/scripts/cluster/node*/

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,151 +20,106 @@
 #define COUNTER_TYPE_ID (102)
 #define COUNTER_KEY_LENGTH (sizeof(int64_t) + 3)
 
-class DriverConductorCounterTest : public DriverConductorTest
+using testing::_;
+
+class DriverConductorCounterTest : public DriverConductorTest, public testing::Test
 {
 public:
-    DriverConductorCounterTest() :
-        m_keyBuffer(m_key.data(), m_key.size())
-    {
-        m_key.fill(0);
-    }
 
 protected:
+
     std::string m_label = COUNTER_LABEL;
-    std::array<uint8_t,COUNTER_KEY_LENGTH> m_key;
-    AtomicBuffer m_keyBuffer;
+    uint8_t m_key[COUNTER_KEY_LENGTH] = { 0 };
+    size_t m_key_length = COUNTER_KEY_LENGTH;
 };
 
 TEST_F(DriverConductorCounterTest, shouldBeAbleToAddSingleCounter)
 {
-    int64_t client_id = nextCorrelationId();
+    int64_t client_id = 66;
     int64_t reg_id = nextCorrelationId();
-    int32_t counter_id = -1;
 
-    m_keyBuffer.putInt64(0, reg_id);
-    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key.data(), m_key.size(), m_label), 0);
+    memcpy(m_key, &reg_id, sizeof(reg_id));
+    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
     doWork();
 
-    auto handler = [&](std::int32_t msgTypeId, AtomicBuffer& buffer, util::index_t offset, util::index_t length)
-    {
-        ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_COUNTER_READY);
+    int32_t client_counter_id;
+    int32_t counter_id;
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _))
+        .With(IsCounterUpdate(client_id, _))
+        .WillOnce(CaptureCounterId(&client_counter_id));
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _))
+        .With(IsCounterUpdate(reg_id, _))
+        .WillOnce(CaptureCounterId(&counter_id));
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 
-        const command::CounterUpdateFlyweight response(buffer, offset);
-
-        EXPECT_EQ(response.correlationId(), reg_id);
-        counter_id = response.counterId();
-        EXPECT_GE(counter_id, 0);
-    };
-
-    EXPECT_EQ(readAllBroadcastsFromConductor(handler), 1u);
-
-    auto counter_func = [&](std::int32_t id, std::int32_t typeId, const AtomicBuffer& key, const std::string& label)
-    {
-        EXPECT_EQ(typeId, COUNTER_TYPE_ID);
-        EXPECT_EQ(label, m_label);
-        EXPECT_EQ(key.getInt64(0), reg_id);
-    };
-
-    EXPECT_TRUE(findCounter(counter_id, counter_func));
+    EXPECT_CALL(m_mockCallbacks, onCounter(_, _, _, _, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, onCounter(_, COUNTER_TYPE_ID, _, _, _, _)).
+        With(IsIdCounter(reg_id, m_label));
+    EXPECT_CALL(m_mockCallbacks, onCounter(_, AERON_COUNTER_CLIENT_HEARTBEAT_TIMESTAMP_TYPE_ID, _, _, _, _)).
+        With(IsIdCounter(client_id, std::string("client-heartbeat: id=66")));
+    readCounters(mock_counter_handler);
 }
 
 TEST_F(DriverConductorCounterTest, shouldRemoveSingleCounter)
 {
     int64_t client_id = nextCorrelationId();
     int64_t reg_id = nextCorrelationId();
-    int32_t counter_id = -1;
 
-    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key.data(), m_key.size(), m_label), 0);
+    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
     doWork();
 
-    auto handler = [&](std::int32_t msgTypeId, AtomicBuffer& buffer, util::index_t offset, util::index_t length)
-    {
-        ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_COUNTER_READY);
+    int32_t counter_id;
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _))
+        .With(IsCounterUpdate(reg_id, _))
+        .WillOnce(CaptureCounterId(&counter_id));
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 
-        const command::CounterUpdateFlyweight response(buffer, offset);
-
-        EXPECT_EQ(response.correlationId(), reg_id);
-        counter_id = response.counterId();
-        EXPECT_GE(counter_id, 0);
-    };
-
-    EXPECT_EQ(readAllBroadcastsFromConductor(handler), 1u);
+    testing::Mock::VerifyAndClear(&m_mockCallbacks);
 
     int64_t remove_correlation_id = nextCorrelationId();
     ASSERT_EQ(removeCounter(client_id, remove_correlation_id, reg_id), 0);
     doWork();
 
-    size_t response_number = 0;
-
-    auto remove_handler = [&](std::int32_t msgTypeId, AtomicBuffer& buffer, util::index_t offset, util::index_t length)
-    {
-        if (0 == response_number)
-        {
-            ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_OPERATION_SUCCESS);
-
-            const command::OperationSucceededFlyweight response(buffer, offset);
-
-            EXPECT_EQ(response.correlationId(), remove_correlation_id);
-        }
-        else if (1 == response_number)
-        {
-            ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_UNAVAILABLE_COUNTER);
-
-            const command::CounterUpdateFlyweight response(buffer, offset);
-
-            EXPECT_EQ(response.correlationId(), reg_id);
-            EXPECT_EQ(response.counterId(), counter_id);
-        }
-
-        response_number++;
-    };
-
-    EXPECT_EQ(readAllBroadcastsFromConductor(remove_handler), 2u);
-
-    auto counter_func = [&](std::int32_t id, std::int32_t typeId, const AtomicBuffer& key, const std::string& label) {};
-
-    EXPECT_FALSE(findCounter(counter_id, counter_func));
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_UNAVAILABLE_COUNTER, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_OPERATION_SUCCESS, _, _))
+        .With(IsOperationSuccess(remove_correlation_id));
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_UNAVAILABLE_COUNTER, _, _))
+        .With(IsCounterUpdate(reg_id, counter_id));
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 }
 
 TEST_F(DriverConductorCounterTest, shouldRemoveCounterOnClientTimeout)
 {
     int64_t client_id = nextCorrelationId();
     int64_t reg_id = nextCorrelationId();
-    int32_t counter_id = -1;
 
-    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key.data(), m_key.size(), m_label), 0);
+    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
     doWork();
 
-    auto handler = [&](std::int32_t msgTypeId, AtomicBuffer& buffer, util::index_t offset, util::index_t length)
-    {
-        ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_COUNTER_READY);
+    int32_t counter_id;
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _))
+        .With(IsCounterUpdate(reg_id, _))
+        .WillOnce(CaptureCounterId(&counter_id));
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 
-        const command::CounterUpdateFlyweight response(buffer, offset);
+    testing::Mock::VerifyAndClear(&m_mockCallbacks);
 
-        EXPECT_EQ(response.correlationId(), reg_id);
-        counter_id = response.counterId();
-        EXPECT_GE(counter_id, 0);
-    };
-
-    EXPECT_EQ(readAllBroadcastsFromConductor(handler), 1u);
-
-    doWorkUntilTimeNs((m_context.m_context->client_liveness_timeout_ns * 2));
+    doWorkForNs((int64_t)(m_context.m_context->client_liveness_timeout_ns * 2));
     EXPECT_EQ(aeron_driver_conductor_num_clients(&m_conductor.m_conductor), 0u);
 
-    auto counter_func = [&](std::int32_t id, std::int32_t typeId, const AtomicBuffer& key, const std::string& label) {};
+    EXPECT_CALL(m_mockCallbacks, onCounter(_, _, _, _, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, onCounter(counter_id, _, _, _, _, _)).Times(0);
+    readCounters(mock_counter_handler);
 
-    EXPECT_FALSE(findCounter(counter_id, counter_func));
-
-    auto timeout_handler = [&](std::int32_t msgTypeId, AtomicBuffer& buffer, util::index_t offset, util::index_t length)
-    {
-        ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_CLIENT_TIMEOUT);
-
-        const command::ClientTimeoutFlyweight response(buffer, offset);
-
-        EXPECT_EQ(response.clientId(), client_id);
-    };
-
-    EXPECT_EQ(readAllBroadcastsFromConductor(timeout_handler), 1u);
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_CLIENT_TIMEOUT, _, _))
+        .With(IsTimeout(client_id));
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_UNAVAILABLE_COUNTER, _, _))
+        .With(IsCounterUpdate(reg_id, counter_id));
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_UNAVAILABLE_COUNTER, _, _))
+        .With(IsCounterUpdate(client_id, _));
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 }
 
 TEST_F(DriverConductorCounterTest, shouldRemoveMultipleCountersOnClientTimeout)
@@ -172,42 +127,68 @@ TEST_F(DriverConductorCounterTest, shouldRemoveMultipleCountersOnClientTimeout)
     int64_t client_id = nextCorrelationId();
     int64_t reg_id1 = nextCorrelationId();
     int64_t reg_id2 = nextCorrelationId();
+    int total_client_plus_custom_counters = 3;
 
-    ASSERT_EQ(addCounter(client_id, reg_id1, COUNTER_TYPE_ID, m_key.data(), m_key.size(), m_label), 0);
-    ASSERT_EQ(addCounter(client_id, reg_id2, COUNTER_TYPE_ID, m_key.data(), m_key.size(), m_label), 0);
+    ASSERT_EQ(addCounter(client_id, reg_id1, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
+    ASSERT_EQ(addCounter(client_id, reg_id2, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
+    doWork();
     doWork();
 
-    EXPECT_EQ(readAllBroadcastsFromConductor(null_handler), 2u);
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
+    testing::Mock::VerifyAndClear(&m_mockCallbacks);
 
-    doWorkUntilTimeNs((m_context.m_context->client_liveness_timeout_ns * 2));
-    EXPECT_EQ(aeron_driver_conductor_num_clients(&m_conductor.m_conductor), 0u);
+    doWorkForNs((int64_t)(m_context.m_context->client_liveness_timeout_ns * 2));
+
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_CLIENT_TIMEOUT, _, _));
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_UNAVAILABLE_COUNTER, _, _))
+        .Times(total_client_plus_custom_counters);
+
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
+}
+
+TEST_F(DriverConductorCounterTest, shouldRemoveMultipleCountersOnClientClose)
+{
+    test_set_nano_time(INT64_C(100) * 1000 * 1000 * 1000);
+
+    int64_t client_id = nextCorrelationId();
+    int64_t reg_id1 = nextCorrelationId();
+    int64_t reg_id2 = nextCorrelationId();
+    int total_client_plus_custom_counters = 3;
+
+    ASSERT_EQ(addCounter(client_id, reg_id1, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
+    ASSERT_EQ(addCounter(client_id, reg_id2, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
+    doWork();
+
+    closeClient(client_id);
+    doWork();
+    doWorkForNs((int64_t)(m_context.m_context->timer_interval_ns));
+
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _))
+        .Times(total_client_plus_custom_counters);
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_UNAVAILABLE_COUNTER, _, _))
+        .Times(total_client_plus_custom_counters);
+
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 }
 
 TEST_F(DriverConductorCounterTest, shouldNotRemoveCounterOnClientKeepalive)
 {
     int64_t client_id = nextCorrelationId();
     int64_t reg_id = nextCorrelationId();
-    int32_t counter_id = -1;
 
-    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key.data(), m_key.size(), m_label), 0);
+    ASSERT_EQ(addCounter(client_id, reg_id, COUNTER_TYPE_ID, m_key, m_key_length, m_label), 0);
     doWork();
 
-    auto handler = [&](std::int32_t msgTypeId, AtomicBuffer& buffer, util::index_t offset, util::index_t length)
-    {
-        ASSERT_EQ(msgTypeId, AERON_RESPONSE_ON_COUNTER_READY);
+    int32_t counter_id;
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, broadcastToClient(AERON_RESPONSE_ON_COUNTER_READY, _, _))
+        .With(IsCounterUpdate(reg_id, _))
+        .WillOnce(CaptureCounterId(&counter_id));
+    readAllBroadcastsFromConductor(mock_broadcast_handler);
 
-        const command::CounterUpdateFlyweight response(buffer, offset);
+    int64_t timeout = (int64_t)m_context.m_context->client_liveness_timeout_ns * 2;
 
-        EXPECT_EQ(response.correlationId(), reg_id);
-        counter_id = response.counterId();
-        EXPECT_GE(counter_id, 0);
-    };
-
-    EXPECT_EQ(readAllBroadcastsFromConductor(handler), 1u);
-
-    int64_t timeout = m_context.m_context->client_liveness_timeout_ns * 2;
-
-    doWorkUntilTimeNs(
+    doWorkForNs(
         timeout,
         100,
         [&]()
@@ -215,11 +196,40 @@ TEST_F(DriverConductorCounterTest, shouldNotRemoveCounterOnClientKeepalive)
             clientKeepalive(client_id);
         });
 
-
     EXPECT_EQ(aeron_driver_conductor_num_clients(&m_conductor.m_conductor), 1u);
 
-    auto counter_func = [&](std::int32_t id, std::int32_t typeId, const AtomicBuffer& key, const std::string& label) {};
-
-    EXPECT_TRUE(findCounter(counter_id, counter_func));
+    EXPECT_CALL(m_mockCallbacks, onCounter(_, _, _, _, _, _)).Times(testing::AnyNumber());
+    EXPECT_CALL(m_mockCallbacks, onCounter(counter_id, _, _, _, _, _)).Times(1);
+    readCounters(mock_counter_handler);
 }
 
+TEST_F(DriverConductorCounterTest, shouldIncrementCounterOnConductorThresholdExceeded)
+{
+    volatile int64_t *maxCycleTimeCounter = aeron_counters_manager_addr(
+        &m_conductor.m_conductor.counters_manager, AERON_SYSTEM_COUNTER_CONDUCTOR_MAX_CYCLE_TIME);
+    volatile int64_t *thresholdExceededCounter = aeron_counters_manager_addr(
+        &m_conductor.m_conductor.counters_manager, AERON_SYSTEM_COUNTER_CONDUCTOR_CYCLE_TIME_THRESHOLD_EXCEEDED);
+
+    nano_time = 0;
+    doWork();
+    nano_time = INT64_C(750) * 1000 * 1000;
+    doWork();
+    nano_time = INT64_C(1750) * 1000 * 1000;
+    doWork();
+    nano_time = INT64_C(2250) * 1000 * 1000;
+    doWork();
+    nano_time = INT64_C(2850) * 1000 * 1000;
+    doWork();
+    nano_time = INT64_C(3451) * 1000 * 1000;
+    doWork();
+
+    int64_t maxCycleTime;
+    AERON_GET_ACQUIRE(maxCycleTime, *maxCycleTimeCounter);
+
+    ASSERT_EQ(1000 * 1000 * 1000, maxCycleTime);
+
+    int64_t thresholdExceeded;
+    AERON_GET_ACQUIRE(thresholdExceeded, *thresholdExceededCounter);
+
+    ASSERT_EQ(3, thresholdExceeded);
+}

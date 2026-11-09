@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,13 @@
  */
 package io.aeron.driver.ext;
 
+import io.aeron.driver.Configuration;
 import io.aeron.driver.CongestionControl;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.media.UdpChannel;
 import io.aeron.driver.status.PerImageIndicator;
 import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.NanoClock;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
@@ -32,8 +34,10 @@ import static io.aeron.driver.CongestionControl.packOutcome;
 /**
  * CUBIC congestion control manipulation of the receiver window length.
  * <p>
- * <a target="_blank" href="https://research.csc.ncsu.edu/netsrv/?q=content/bic-and-cubic">
- *     https://research.csc.ncsu.edu/netsrv/?q=content/bic-and-cubic</a>
+ * <a target="_blank" href="https://tools.ietf.org/id/draft-rhee-tcpm-cubic-02.txt">
+ * https://tools.ietf.org/id/draft-rhee-tcpm-cubic-02.txt</a> and
+ * <a target="_blank" href="https://dl.acm.org/doi/10.1145/1400097.1400105">
+ * https://dl.acm.org/doi/10.1145/1400097.1400105</a>
  * <p>
  * {@code W_cubic = C(T - K)^3 + w_max}
  * <p>
@@ -48,35 +52,55 @@ import static io.aeron.driver.CongestionControl.packOutcome;
  */
 public class CubicCongestionControl implements CongestionControl
 {
-    private static final boolean RTT_MEASUREMENT = CubicCongestionControlConfiguration.MEASURE_RTT;
-    private static final boolean TCP_MODE = CubicCongestionControlConfiguration.TCP_MODE;
+    /**
+     * URI param value to identify this {@link CongestionControl} strategy.
+     */
+    public static final String CC_PARAM_VALUE = "cubic";
 
-    private static final long RTT_MEASUREMENT_TIMEOUT_NS = TimeUnit.MILLISECONDS.toNanos(10);
     private static final long SECOND_IN_NS = TimeUnit.SECONDS.toNanos(1);
-    private static final long RTT_MAX_TIMEOUT_NS = SECOND_IN_NS;
-    private static final int MAX_OUTSTANDING_RTT_MEASUREMENTS = 1;
+    private static final int INITCWND = 10;
+    private static final int RTT_TIMEOUT_MULTIPLE = 4;
 
     private static final double C = 0.4;
     private static final double B = 0.2;
 
-    private final int minWindow;
     private final int mtu;
     private final int maxCwnd;
+    private final int initialWindowLength;
+    private final int maxWindowLength;
 
-    private long lastLossTimestampNs;
-    private long lastUpdateTimestampNs;
-    private long lastRttTimestampNs = 0;
-    private final long windowUpdateTimeoutNs;
-    private long rttInNs;
     private double k;
-    private int cwnd;
     private int w_max;
+    private int windowLength;
+    private int cwnd;
 
-    private int outstandingRttMeasurements = 0;
+    private long lastUpdateTimestampNs;
+    private long lastLossTimestampNs;
+    private long lastRttTimestampNs = 0;
+    private long rttNs;
+    private long rttTimeoutNs;
+    private final long windowUpdateTimeoutNs;
 
+    private final ErrorHandler errorHandler;
     private final AtomicCounter rttIndicator;
     private final AtomicCounter windowIndicator;
 
+    /**
+     * Construct a new {@link CongestionControl} instance for a received stream image using the Cubic algorithm.
+     *
+     * @param registrationId  for the publication image.
+     * @param udpChannel      for the publication image.
+     * @param streamId        for the publication image.
+     * @param sessionId       for the publication image.
+     * @param termLength      for the publication image.
+     * @param senderMtuLength for the publication image.
+     * @param controlAddress  for the publication image.
+     * @param sourceAddress   for the publication image.
+     * @param nanoClock       for the precise timing.
+     * @param context         for configuration options applied in the driver.
+     * @param countersManager for the driver.
+     */
+    @SuppressWarnings("this-escape")
     public CubicCongestionControl(
         final long registrationId,
         final UdpChannel udpChannel,
@@ -86,70 +110,106 @@ public class CubicCongestionControl implements CongestionControl
         final int senderMtuLength,
         final InetSocketAddress controlAddress,
         final InetSocketAddress sourceAddress,
-        final NanoClock clock,
+        final NanoClock nanoClock,
         final MediaDriver.Context context,
         final CountersManager countersManager)
     {
-        mtu = senderMtuLength;
-        minWindow = senderMtuLength;
-        final int maxWindow = Math.min(termLength >> 1, context.initialWindowLength());
+        try
+        {
+            errorHandler = context.countedErrorHandler();
+            mtu = senderMtuLength;
 
-        maxCwnd = maxWindow / mtu;
-        cwnd = 1;
-        w_max = maxCwnd; // initially set w_max to max window and act in the TCP and concave region initially
-        k = Math.cbrt((double)w_max * B / C);
+            final int receiverWindowLength = 0 != udpChannel.receiverWindowLength() ?
+                udpChannel.receiverWindowLength() : context.initialWindowLength();
+            maxWindowLength = Configuration.receiverWindowLength(termLength, receiverWindowLength);
 
-        // determine interval for adjustment based on heuristic of MTU, max window, and/or RTT estimate
-        rttInNs = CubicCongestionControlConfiguration.INITIAL_RTT_NS;
-        windowUpdateTimeoutNs = rttInNs;
+            maxCwnd = maxWindowLength / mtu;
+            cwnd = Math.min(INITCWND, maxCwnd);
+            this.initialWindowLength = cwnd * mtu;
+            w_max = maxCwnd; // initially set w_max to max window and act in the TCP and concave region initially
+            k = StrictMath.cbrt((double)w_max * B / C);
 
-        rttIndicator = PerImageIndicator.allocate(
-            context.tempBuffer(),
-            "rcv-cc-cubic-rtt",
-            countersManager,
-            registrationId,
-            sessionId,
-            streamId,
-            udpChannel.originalUriString());
+            // determine interval for adjustment based on heuristic of MTU, max window, and/or RTT estimate
+            rttNs = CubicCongestionControlConfiguration.INITIAL_RTT_NS;
+            windowUpdateTimeoutNs = rttNs;
+            rttTimeoutNs = rttNs * RTT_TIMEOUT_MULTIPLE;
 
-        windowIndicator = PerImageIndicator.allocate(
-            context.tempBuffer(),
-            "rcv-cc-cubic-wnd",
-            countersManager,
-            registrationId,
-            sessionId,
-            streamId,
-            udpChannel.originalUriString());
+            rttIndicator = PerImageIndicator.allocate(
+                context.tempBuffer(),
+                "rcv-cc-cubic-rtt",
+                countersManager,
+                registrationId,
+                sessionId,
+                streamId,
+                udpChannel.originalUriString());
 
-        rttIndicator.setOrdered(0);
-        windowIndicator.setOrdered(minWindow);
+            windowIndicator = PerImageIndicator.allocate(
+                context.tempBuffer(),
+                "rcv-cc-cubic-wnd",
+                countersManager,
+                registrationId,
+                sessionId,
+                streamId,
+                udpChannel.originalUriString());
 
-        lastLossTimestampNs = clock.nanoTime();
-        lastUpdateTimestampNs = lastLossTimestampNs;
+            windowLength = this.initialWindowLength;
+            rttIndicator.setRelease(0);
+            windowIndicator.setRelease(this.initialWindowLength);
+
+            lastLossTimestampNs = nanoClock.nanoTime();
+            lastUpdateTimestampNs = lastLossTimestampNs;
+        }
+        catch (final Exception ex)
+        {
+            close();
+            throw ex;
+        }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close()
+    {
+        CloseHelper.close(errorHandler, rttIndicator);
+        CloseHelper.close(errorHandler, windowIndicator);
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean shouldMeasureRtt(final long nowNs)
     {
-        return RTT_MEASUREMENT &&
-            outstandingRttMeasurements < MAX_OUTSTANDING_RTT_MEASUREMENTS &&
-            (((lastRttTimestampNs + RTT_MAX_TIMEOUT_NS) - nowNs < 0) ||
-                ((lastRttTimestampNs + RTT_MEASUREMENT_TIMEOUT_NS) - nowNs < 0));
+        return CubicCongestionControlConfiguration.MEASURE_RTT && ((lastRttTimestampNs + rttTimeoutNs) - nowNs < 0);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onRttMeasurementSent(final long nowNs)
     {
         lastRttTimestampNs = nowNs;
-        outstandingRttMeasurements++;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onRttMeasurement(final long nowNs, final long rttNs, final InetSocketAddress srcAddress)
     {
-        outstandingRttMeasurements--;
         lastRttTimestampNs = nowNs;
-        this.rttInNs = rttNs;
-        rttIndicator.setOrdered(rttNs);
+        this.rttNs = rttNs;
+        rttIndicator.setRelease(rttNs);
+        rttTimeoutNs = Math.max(rttNs, CubicCongestionControlConfiguration.INITIAL_RTT_NS) * RTT_TIMEOUT_MULTIPLE;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long onTrackRebuild(
         final long nowNs,
         final long newConsumptionPosition,
@@ -163,11 +223,14 @@ public class CubicCongestionControl implements CongestionControl
 
         if (lossOccurred)
         {
-            w_max = cwnd;
-            k = Math.cbrt((double)w_max * B / C);
-            cwnd = Math.min(1, (int)(cwnd * (1.0 - B)));
-            lastLossTimestampNs = nowNs;
             forceStatusMessage = true;
+            w_max = cwnd;
+            k = StrictMath.cbrt((double)w_max * B / C);
+            cwnd = Math.max(1, (int)(cwnd * (1.0 - B)));
+            windowLength = cwnd * mtu;
+            windowIndicator.setRelease(windowLength);
+
+            lastLossTimestampNs = nowNs;
         }
         else if (cwnd < maxCwnd && ((lastUpdateTimestampNs + windowUpdateTimeoutNs) - nowNs < 0))
         {
@@ -179,34 +242,55 @@ public class CubicCongestionControl implements CongestionControl
             cwnd = Math.min(maxCwnd, w_max + (int)incr);
 
             // if using TCP mode, then check to see if we are in the TCP region
-            if (TCP_MODE && cwnd < w_max)
+            if (CubicCongestionControlConfiguration.TCP_MODE && cwnd < w_max)
             {
                 // W_tcp(t) = w_max * (1 - B) + 3 * B / (2 - B) * t / RTT
-
-                final double rttInSeconds = (double)rttInNs / (double)SECOND_IN_NS;
-                final double wTcp =
-                    (double)w_max * (1.0 - B) + ((3.0 * B / (2.0 * B)) * (durationSinceDecr / rttInSeconds));
+                final double rttInSeconds = (double)rttNs / (double)SECOND_IN_NS;
+                final double wTcp = (double)w_max * (1.0 - B) +
+                    ((3.0 * B / (2.0 - B)) * (durationSinceDecr / rttInSeconds));
 
                 cwnd = Math.max(cwnd, (int)wTcp);
             }
 
+            final int windowLength = cwnd * mtu;
+            if (windowLength != this.windowLength)
+            {
+                this.windowLength = windowLength;
+                windowIndicator.setRelease(windowLength);
+            }
+
             lastUpdateTimestampNs = nowNs;
         }
+        else if (1 == cwnd && newConsumptionPosition > lastSmPosition)
+        {
+            // force out an SM (and update of nextSmPosition) whenever the consumption position moves when
+            // window is at minimum.
+            forceStatusMessage = true;
+        }
 
-        final int window = cwnd * mtu;
-        windowIndicator.setOrdered(window);
-
-        return packOutcome(window, forceStatusMessage);
+        return packOutcome(windowLength, forceStatusMessage);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public int initialWindowLength()
     {
-        return minWindow;
+        return initialWindowLength;
     }
 
-    public void close()
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int maxWindowLength()
     {
-        CloseHelper.close(rttIndicator);
-        CloseHelper.close(windowIndicator);
+        return maxWindowLength;
+    }
+
+    int maxCongestionWindow()
+    {
+        return maxCwnd;
     }
 }

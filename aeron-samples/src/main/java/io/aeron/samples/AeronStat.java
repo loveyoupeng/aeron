@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,11 +17,13 @@ package io.aeron.samples;
 
 import io.aeron.CncFileDescriptor;
 import io.aeron.status.ChannelEndpointStatus;
+import org.agrona.AsciiEncoding;
 import org.agrona.DirectBuffer;
 import org.agrona.SystemUtil;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.status.CountersReader;
 
+import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,12 +37,15 @@ import static io.aeron.driver.status.ReceiveChannelStatus.RECEIVE_CHANNEL_STATUS
 import static io.aeron.driver.status.ReceiverPos.RECEIVER_POS_TYPE_ID;
 import static io.aeron.driver.status.SendChannelStatus.SEND_CHANNEL_STATUS_TYPE_ID;
 import static io.aeron.driver.status.SenderLimit.SENDER_LIMIT_TYPE_ID;
-import static io.aeron.driver.status.StreamCounter.*;
+import static io.aeron.driver.status.StreamCounter.CHANNEL_OFFSET;
+import static io.aeron.driver.status.StreamCounter.REGISTRATION_ID_OFFSET;
+import static io.aeron.driver.status.StreamCounter.SESSION_ID_OFFSET;
+import static io.aeron.driver.status.StreamCounter.STREAM_ID_OFFSET;
 import static io.aeron.driver.status.SystemCounterDescriptor.SYSTEM_COUNTER_TYPE_ID;
 
 /**
  * Tool for printing out Aeron counters. A command-and-control (CnC) file is maintained by media driver
- * in shared memory. This application reads the the cnc file and prints the counters. Layout of the cnc file is
+ * in shared memory. This application reads the CnC file and prints the counters. Layout of the CnC file is
  * described in {@link CncFileDescriptor}.
  * <p>
  * This tool accepts filters on the command line, e.g. for connections only see example below:
@@ -51,6 +56,7 @@ import static io.aeron.driver.status.SystemCounterDescriptor.SYSTEM_COUNTER_TYPE
  */
 public class AeronStat
 {
+    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("HH:mm:ss");
     private static final String ANSI_CLS = "\u001b[2J";
     private static final String ANSI_HOME = "\u001b[H";
 
@@ -94,7 +100,14 @@ public class AeronStat
      */
     private static final String COUNTER_CHANNEL = "channel";
 
-    public static void main(final String[] args) throws Exception
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws IOException          if an error occurs writing to the console.
+     * @throws InterruptedException if the thread sleep delay is interrupted.
+     */
+    public static void main(final String[] args) throws IOException, InterruptedException
     {
         long delayMs = 1000L;
         boolean watch = true;
@@ -172,32 +185,35 @@ public class AeronStat
         }
     }
 
-    private static void workLoop(final long delayMs, final Runnable outputPrinter) throws Exception
+    @SuppressWarnings("try")
+    private static void workLoop(final long delayMs, final Runnable outputPrinter)
+        throws IOException, InterruptedException
     {
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        do
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            clearScreen();
-            outputPrinter.run();
-            Thread.sleep(delayMs);
+            do
+            {
+                clearScreen();
+                outputPrinter.run();
+                Thread.sleep(delayMs);
+            }
+            while (running.get());
         }
-        while (running.get());
     }
 
     private static void printOutput(final CncFileReader cncFileReader, final CounterFilter counterFilter)
     {
-        final SimpleDateFormat dateFormat = new SimpleDateFormat("HH:mm:ss");
-
-        System.out.print(dateFormat.format(new Date()));
+        System.out.print(DATE_FORMAT.format(new Date()));
         System.out.println(
             " - Aeron Stat (CnC v" + cncFileReader.semanticVersion() + ")" +
-            ", pid " + SystemUtil.getPid() +
+            ", pid " + cncFileReader.driverPid() +
             ", heartbeat age " + cncFileReader.driverHeartbeatAgeMs() + "ms");
         System.out.println("======================================================================");
 
         final CountersReader counters = cncFileReader.countersReader();
+        final int maxIdWidth = AsciiEncoding.digitCount(counters.maxCounterId());
+        final String formatString = "%" + maxIdWidth + "d: %,26d - %s%n";
 
         counters.forEach(
             (counterId, typeId, keyBuffer, label) ->
@@ -205,7 +221,7 @@ public class AeronStat
                 if (counterFilter.filter(typeId, keyBuffer))
                 {
                     final long value = counters.getCounterValue(counterId);
-                    System.out.format("%3d: %,20d - %s%n", counterId, value, label);
+                    System.out.format(formatString, counterId, value, label);
                 }
             }
         );
@@ -226,8 +242,8 @@ public class AeronStat
                     "filter by optional regex patterns:%n" +
                     "\t[type=<pattern>]%n" +
                     "\t[identity=<pattern>]%n" +
-                    "\t[sessionId=<pattern>]%n" +
-                    "\t[streamId=<pattern>]%n" +
+                    "\t[session=<pattern>]%n" +
+                    "\t[stream=<pattern>]%n" +
                     "\t[channel=<pattern>]%n");
 
                 System.exit(0);
@@ -235,11 +251,11 @@ public class AeronStat
         }
     }
 
-    private static void clearScreen() throws Exception
+    private static void clearScreen() throws IOException, InterruptedException
     {
-        if (SystemUtil.osName().contains("win"))
+        if (SystemUtil.isWindows())
         {
-            new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
+            new ProcessBuilder("C:\\Windows\\System32\\cmd.exe", "/c", "cls").inheritIO().start().waitFor();
         }
         else
         {

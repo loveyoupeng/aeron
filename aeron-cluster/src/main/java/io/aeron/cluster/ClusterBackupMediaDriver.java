@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@ import io.aeron.archive.Archive;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.status.SystemCounterDescriptor;
 import org.agrona.CloseHelper;
+import org.agrona.ErrorHandler;
+import org.agrona.concurrent.ShutdownSignalBarrier;
+import org.agrona.concurrent.status.AtomicCounter;
 
 import static org.agrona.SystemUtil.loadPropertiesFiles;
 
@@ -44,14 +47,18 @@ public class ClusterBackupMediaDriver implements AutoCloseable
      *
      * @param args command line argument which is a list for properties files as URLs or filenames.
      */
+    @SuppressWarnings("try")
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
 
-        try (ClusterBackupMediaDriver driver = launch())
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier();
+            ClusterBackupMediaDriver ignore = launch(
+                new MediaDriver.Context().terminationHook(barrier::signalAll),
+                new Archive.Context(),
+                new ClusterBackup.Context().terminationHook(barrier::signalAll)))
         {
-            driver.clusterBackup().context().shutdownSignalBarrier().await();
-
+            barrier.await();
             System.out.println("Shutdown ClusterBackupMediaDriver...");
         }
     }
@@ -69,9 +76,9 @@ public class ClusterBackupMediaDriver implements AutoCloseable
     /**
      * Launch a new {@link ClusterBackupMediaDriver} with provided contexts.
      *
-     * @param driverCtx          for configuring the {@link MediaDriver}.
-     * @param archiveCtx         for configuring the {@link Archive}.
-     * @param clusterBackupCtx   for the configuration of the {@link ClusterBackup}.
+     * @param driverCtx        for configuring the {@link MediaDriver}.
+     * @param archiveCtx       for configuring the {@link Archive}.
+     * @param clusterBackupCtx for the configuration of the {@link ClusterBackup}.
      * @return a new {@link ClusterBackupMediaDriver} with the provided contexts.
      */
     public static ClusterBackupMediaDriver launch(
@@ -79,17 +86,38 @@ public class ClusterBackupMediaDriver implements AutoCloseable
         final Archive.Context archiveCtx,
         final ClusterBackup.Context clusterBackupCtx)
     {
-        final MediaDriver driver = MediaDriver.launch(driverCtx
-            .spiesSimulateConnection(true));
+        MediaDriver driver = null;
+        Archive archive = null;
+        ClusterBackup clusterBackup = null;
 
-        final Archive archive = Archive.launch(archiveCtx
-            .mediaDriverAgentInvoker(driver.sharedAgentInvoker())
-            .errorHandler(driverCtx.errorHandler())
-            .errorCounter(driverCtx.systemCounters().get(SystemCounterDescriptor.ERRORS)));
+        try
+        {
+            driver = MediaDriver.launch(driverCtx
+                .spiesSimulateConnection(true));
 
-        final ClusterBackup clusterBackup = ClusterBackup.launch(clusterBackupCtx);
+            final int errorCounterId = SystemCounterDescriptor.ERRORS.id();
+            final AtomicCounter errorCounter = null != archiveCtx.errorCounter() ?
+                archiveCtx.errorCounter() : new AtomicCounter(driverCtx.countersValuesBuffer(), errorCounterId);
 
-        return new ClusterBackupMediaDriver(driver, archive, clusterBackup);
+            final ErrorHandler errorHandler = null != archiveCtx.errorHandler() ?
+                archiveCtx.errorHandler() : driverCtx.errorHandler();
+
+            archive = Archive.launch(archiveCtx
+                .aeronDirectoryName(driverCtx.aeronDirectoryName())
+                .mediaDriverAgentInvoker(driver.sharedAgentInvoker())
+                .errorHandler(errorHandler)
+                .errorCounter(errorCounter));
+
+            clusterBackup = ClusterBackup.launch(clusterBackupCtx
+                .aeronDirectoryName(driverCtx.aeronDirectoryName()));
+
+            return new ClusterBackupMediaDriver(driver, archive, clusterBackup);
+        }
+        catch (final Exception ex)
+        {
+            CloseHelper.quietCloseAll(clusterBackup, archive, driver);
+            throw ex;
+        }
     }
 
     /**
@@ -122,10 +150,12 @@ public class ClusterBackupMediaDriver implements AutoCloseable
         return clusterBackup;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
-        CloseHelper.close(clusterBackup);
-        CloseHelper.close(archive);
-        CloseHelper.close(driver);
+        CloseHelper.closeAll(clusterBackup, archive, driver);
     }
 }

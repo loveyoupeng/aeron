@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,19 +34,30 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public class OperationSucceededFlyweight
 {
+    /**
+     * Length of the header.
+     */
+    public static final int LENGTH = SIZE_OF_LONG;
     private static final int CORRELATION_ID_FIELD_OFFSET = 0;
 
-    public static final int LENGTH = SIZE_OF_LONG;
+    private MutableDirectBuffer buffer;
+    private int offset;
 
-    protected MutableDirectBuffer buffer;
-    protected int offset;
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public OperationSucceededFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
      *
-     * @param buffer to wrap
+     * @param buffer to wrap.
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
     public final OperationSucceededFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
@@ -57,9 +68,9 @@ public class OperationSucceededFlyweight
     }
 
     /**
-     * return correlation id field
+     * The correlation id field.
      *
-     * @return correlation id field
+     * @return correlation id field.
      */
     public long correlationId()
     {
@@ -67,10 +78,10 @@ public class OperationSucceededFlyweight
     }
 
     /**
-     * set correlation id field
+     * Set the correlation id field.
      *
-     * @param correlationId field value
-     * @return for fluent API
+     * @param correlationId field value.
+     * @return this for a fluent API.
      */
     public OperationSucceededFlyweight correlationId(final long correlationId)
     {

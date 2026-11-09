@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,19 +20,23 @@ import io.aeron.ExclusivePublication;
 import io.aeron.archive.Archive;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.codecs.RecordingSignal;
 import io.aeron.archive.codecs.SourceLocation;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.driver.MediaDriver;
 import io.aeron.samples.SampleConfiguration;
 import org.agrona.CloseHelper;
+import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.concurrent.YieldingIdleStrategy;
 import org.agrona.concurrent.status.CountersReader;
 import org.agrona.console.ContinueBarrier;
 
 import java.io.File;
+import java.util.concurrent.TimeUnit;
 
 import static io.aeron.archive.Archive.Configuration.ARCHIVE_DIR_DEFAULT;
-import static io.aeron.samples.archive.TestUtil.MEGABYTE;
+import static io.aeron.samples.archive.Samples.MEGABYTE;
 import static org.agrona.BitUtil.CACHE_LINE_LENGTH;
 import static org.agrona.BufferUtil.allocateDirectAligned;
 import static org.agrona.SystemUtil.loadPropertiesFiles;
@@ -51,7 +55,13 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
     private final Aeron aeron;
     private final AeronArchive aeronArchive;
     private final UnsafeBuffer buffer = new UnsafeBuffer(allocateDirectAligned(MESSAGE_LENGTH, CACHE_LINE_LENGTH));
+    private final RecordingSignalCapture recordingSignalCapture;
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         loadPropertiesFiles(args);
@@ -59,77 +69,96 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
         try (EmbeddedRecordingThroughput test = new EmbeddedRecordingThroughput())
         {
             test.startRecording();
+            long previousRecordingId = Aeron.NULL_VALUE;
 
             final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
             do
             {
-                test.streamMessagesForRecording();
+                if (Aeron.NULL_VALUE != previousRecordingId)
+                {
+                    test.truncateRecording(previousRecordingId);
+                }
+
+                previousRecordingId = test.streamMessagesForRecording();
             }
             while (barrier.await());
         }
     }
 
-    public EmbeddedRecordingThroughput()
+    EmbeddedRecordingThroughput()
     {
         final String archiveDirName = Archive.Configuration.archiveDirName();
         final File archiveDir = ARCHIVE_DIR_DEFAULT.equals(archiveDirName) ?
-            TestUtil.createTempDir() : new File(archiveDirName);
+            Samples.createTempDir() : new File(archiveDirName);
 
         archivingMediaDriver = ArchivingMediaDriver.launch(
             new MediaDriver.Context()
                 .spiesSimulateConnection(true)
                 .dirDeleteOnStart(true),
             new Archive.Context()
-                .deleteArchiveOnStart(true)
+                .recordingEventsEnabled(false)
                 .archiveDir(archiveDir));
 
         aeron = Aeron.connect();
 
+        recordingSignalCapture = new RecordingSignalCapture();
+
         aeronArchive = AeronArchive.connect(
             new AeronArchive.Context()
-                .aeron(aeron));
+                .aeron(aeron)
+                .recordingSignalConsumer(recordingSignalCapture));
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
-        CloseHelper.close(aeronArchive);
-        CloseHelper.close(aeron);
-        CloseHelper.close(archivingMediaDriver);
-
-        archivingMediaDriver.archive().context().deleteArchiveDirectory();
-        archivingMediaDriver.mediaDriver().context().deleteAeronDirectory();
+        CloseHelper.closeAll(
+            aeronArchive,
+            aeron,
+            archivingMediaDriver,
+            () -> archivingMediaDriver.archive().context().deleteDirectory(),
+            () -> archivingMediaDriver.mediaDriver().context().deleteDirectory());
     }
 
-    public void streamMessagesForRecording()
+    private long streamMessagesForRecording()
     {
         try (ExclusivePublication publication = aeron.addExclusivePublication(CHANNEL, STREAM_ID))
         {
+            final IdleStrategy idleStrategy = YieldingIdleStrategy.INSTANCE;
             while (!publication.isConnected())
             {
-                Thread.yield();
+                idleStrategy.idle();
             }
 
-            final long startMs = System.currentTimeMillis();
+            final long startNs = System.nanoTime();
+            final UnsafeBuffer buffer = this.buffer;
 
             for (long i = 0; i < NUMBER_OF_MESSAGES; i++)
             {
                 buffer.putLong(0, i);
+
+                idleStrategy.reset();
                 while (publication.offer(buffer, 0, MESSAGE_LENGTH) < 0)
                 {
-                    Thread.yield();
+                    idleStrategy.idle();
                 }
             }
 
             final long stopPosition = publication.position();
             final CountersReader counters = aeron.countersReader();
-            final int counterId = RecordingPos.findCounterIdBySession(counters, publication.sessionId());
+            final int counterId =
+                RecordingPos.findCounterIdBySession(counters, publication.sessionId(), aeronArchive.archiveId());
 
+            idleStrategy.reset();
             while (counters.getCounterValue(counterId) < stopPosition)
             {
-                Thread.yield();
+                idleStrategy.idle();
             }
 
-            final long durationMs = System.currentTimeMillis() - startMs;
+            final long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
             final double dataRate = (stopPosition * 1000.0d / durationMs) / MEGABYTE;
             final double recordingMb = stopPosition / MEGABYTE;
             final long msgRate = (NUMBER_OF_MESSAGES / durationMs) * 1000L;
@@ -137,11 +166,21 @@ public class EmbeddedRecordingThroughput implements AutoCloseable
             System.out.printf(
                 "Recorded %.02f MB @ %.02f MB/s - %,d msg/sec - %d byte payload + 32 byte header%n",
                 recordingMb, dataRate, msgRate, MESSAGE_LENGTH);
+
+            return RecordingPos.getRecordingId(counters, counterId);
         }
     }
 
-    public void startRecording()
+    private void startRecording()
     {
         aeronArchive.startRecording(CHANNEL, STREAM_ID, SourceLocation.LOCAL);
+    }
+
+    private void truncateRecording(final long previousRecordingId)
+    {
+        recordingSignalCapture.reset();
+        aeronArchive.truncateRecording(previousRecordingId, 0L);
+
+        recordingSignalCapture.awaitSignalForRecordingId(aeronArchive, previousRecordingId, RecordingSignal.DELETE);
     }
 }

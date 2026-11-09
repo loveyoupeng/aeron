@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,38 +20,103 @@ import org.agrona.Strings;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.ProtocolFamily;
+import java.net.SocketException;
 import java.net.UnknownHostException;
 
-class InterfaceSearchAddress
+import static io.aeron.driver.media.NetworkUtil.filterBySubnet;
+import static io.aeron.driver.media.NetworkUtil.findAddressOnInterface;
+import static java.lang.System.lineSeparator;
+import static java.util.Objects.requireNonNull;
+
+record InterfaceSearchAddress(InetSocketAddress address, int subnetPrefix) implements UnresolvedInterface
 {
     private static final InterfaceSearchAddress WILDCARD = new InterfaceSearchAddress(new InetSocketAddress(0), 0);
-    private final InetSocketAddress address;
-    private final int subnetPrefix;
 
-    InterfaceSearchAddress(final InetSocketAddress address, final int subnetPrefix)
+    InterfaceSearchAddress
     {
-        this.address = address;
-        this.subnetPrefix = subnetPrefix;
+        requireNonNull(address, "address must not be null");
     }
 
-    InetSocketAddress getAddress()
+    public ResolvedInterface resolve(final boolean multicast, final ProtocolFamily protocolFamily)
+        throws SocketException
     {
-        return address;
+        final NetworkInterface localInterface;
+        final InetSocketAddress resolvedAddress;
+
+        if (!multicast && address.getAddress().isAnyLocalAddress())
+        {
+            localInterface = null;
+            resolvedAddress = address;
+        }
+        else
+        {
+            localInterface = findInterface();
+            resolvedAddress = resolveToAddressOfInterface(localInterface);
+        }
+
+        return new ResolvedInterface(localInterface, resolvedAddress);
     }
 
-    InetAddress getInetAddress()
+    private InetSocketAddress resolveToAddressOfInterface(final NetworkInterface localInterface)
     {
-        return address.getAddress();
+        final InetAddress interfaceAddress = findAddressOnInterface(localInterface, address.getAddress(), subnetPrefix);
+
+        if (null == interfaceAddress)
+        {
+            throw new IllegalStateException("failed to find " + address.getAddress() + "/" + subnetPrefix + " in " +
+                                            localInterface.getInterfaceAddresses());
+        }
+
+        return new InetSocketAddress(interfaceAddress, address.getPort());
     }
 
-    int getSubnetPrefix()
+    private NetworkInterface findInterface() throws SocketException
     {
-        return subnetPrefix;
+        final NetworkInterface[] filteredInterfaces = filterBySubnet(address.getAddress(), subnetPrefix);
+
+        for (final NetworkInterface networkInterface : filteredInterfaces)
+        {
+            if (networkInterface.isUp() && (networkInterface.supportsMulticast() || networkInterface.isLoopback()))
+            {
+                return networkInterface;
+            }
+        }
+
+        throw new IllegalArgumentException(noMatchingInterfacesError(filteredInterfaces));
     }
 
-    int getPort()
+    private String noMatchingInterfacesError(final NetworkInterface[] filteredInterfaces) throws SocketException
     {
-        return address.getPort();
+        final StringBuilder builder = new StringBuilder()
+            .append("Unable to find multicast or loopback interface matching criteria: ")
+            .append(address.getAddress())
+            .append('/')
+            .append(subnetPrefix);
+
+        if (filteredInterfaces.length > 0)
+        {
+            builder.append(lineSeparator()).append("  Candidates:");
+
+            for (final NetworkInterface ifc : filteredInterfaces)
+            {
+                builder
+                    .append(lineSeparator())
+                    .append("  - Name: ")
+                    .append(ifc.getDisplayName())
+                    .append(", addresses: ")
+                    .append(ifc.getInterfaceAddresses())
+                    .append(", multicast: ")
+                    .append(ifc.supportsMulticast())
+                    .append(", loopback: ")
+                    .append(ifc.isLoopback())
+                    .append(", state: ")
+                    .append(ifc.isUp() ? "UP" : "DOWN");
+            }
+        }
+
+        return builder.toString();
     }
 
     static InterfaceSearchAddress wildcard()
@@ -59,9 +124,9 @@ class InterfaceSearchAddress
         return WILDCARD;
     }
 
-    static InterfaceSearchAddress parse(final String s) throws UnknownHostException
+    static InterfaceSearchAddress parse(final String addressAndPort) throws UnknownHostException
     {
-        if (Strings.isEmpty(s))
+        if (Strings.isEmpty(addressAndPort))
         {
             throw new IllegalArgumentException("search address string is null or empty");
         }
@@ -70,9 +135,9 @@ class InterfaceSearchAddress
         int colonIndex = -1;
         int rightAngleBraceIndex = -1;
 
-        for (int i = 0, length = s.length(); i < length; i++)
+        for (int i = 0, length = addressAndPort.length(); i < length; i++)
         {
-            switch (s.charAt(i))
+            switch (addressAndPort.charAt(i))
             {
                 case '/':
                     slashIndex = i;
@@ -88,11 +153,11 @@ class InterfaceSearchAddress
             }
         }
 
-        final String addressString = getAddress(s, slashIndex, colonIndex, rightAngleBraceIndex);
+        final String addressString = getAddress(addressAndPort, slashIndex, colonIndex, rightAngleBraceIndex);
         final InetAddress hostAddress = InetAddress.getByName(addressString);
-        final int port = getPort(s, slashIndex, colonIndex, rightAngleBraceIndex);
+        final int port = getPort(addressAndPort, slashIndex, colonIndex, rightAngleBraceIndex);
         final int defaultSubnetPrefix = hostAddress.getAddress().length * 8;
-        final int subnetPrefix = getSubnet(s, slashIndex, defaultSubnetPrefix);
+        final int subnetPrefix = getSubnet(addressAndPort, slashIndex, defaultSubnetPrefix);
 
         return new InterfaceSearchAddress(new InetSocketAddress(hostAddress, port), subnetPrefix);
     }

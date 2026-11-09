@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,16 +16,16 @@
 package io.aeron.cluster;
 
 import io.aeron.Publication;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
-import io.aeron.exceptions.AeronException;
+import io.aeron.cluster.service.Cluster;
 import io.aeron.logbuffer.BufferClaim;
-import org.agrona.CloseHelper;
-import org.agrona.ExpandableArrayBuffer;
+import org.agrona.*;
 
 final class ServiceProxy implements AutoCloseable
 {
-    private static final int SEND_ATTEMPTS = 3;
+    static final int SEND_ATTEMPTS = 5;
 
     private final BufferClaim bufferClaim = new BufferClaim();
     private final MessageHeaderEncoder messageHeaderEncoder = new MessageHeaderEncoder();
@@ -33,15 +33,17 @@ final class ServiceProxy implements AutoCloseable
     private final ClusterMembersResponseEncoder clusterMembersResponseEncoder = new ClusterMembersResponseEncoder();
     private final ServiceTerminationPositionEncoder serviceTerminationPositionEncoder =
         new ServiceTerminationPositionEncoder();
-    private final ElectionStartEventEncoder electionStartEventEncoder = new ElectionStartEventEncoder();
     private final ClusterMembersExtendedResponseEncoder clusterMembersExtendedResponseEncoder =
         new ClusterMembersExtendedResponseEncoder();
+    private final RequestServiceAckEncoder requestServiceAckEncoder = new RequestServiceAckEncoder();
     private final ExpandableArrayBuffer expandableArrayBuffer = new ExpandableArrayBuffer();
     private final Publication publication;
+    private final ErrorHandler errorHandler;
 
-    ServiceProxy(final Publication publication)
+    ServiceProxy(final Publication publication, final ErrorHandler errorHandler)
     {
         this.publication = publication;
+        this.errorHandler = errorHandler;
     }
 
     public void close()
@@ -50,31 +52,36 @@ final class ServiceProxy implements AutoCloseable
     }
 
     void joinLog(
-        final long leadershipTermId,
         final long logPosition,
         final long maxLogPosition,
         final int memberId,
         final int logSessionId,
         final int logStreamId,
-        final String channel)
+        final boolean isStartup,
+        final Cluster.Role role,
+        final String channel,
+        final boolean isStandby)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + JoinLogEncoder.BLOCK_LENGTH +
             JoinLogEncoder.logChannelHeaderLength() + channel.length();
+        long position;
 
-        int attempts = SEND_ATTEMPTS * 2;
+        int attempts = SEND_ATTEMPTS;
         do
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            position = publication.tryClaim(length, bufferClaim);
+            if (position > 0)
             {
                 joinLogEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .leadershipTermId(leadershipTermId)
                     .logPosition(logPosition)
                     .maxLogPosition(maxLogPosition)
                     .memberId(memberId)
                     .logSessionId(logSessionId)
                     .logStreamId(logStreamId)
+                    .isStartup(isStartup ? BooleanType.TRUE : BooleanType.FALSE)
+                    .role(role.code())
+                    .isStandby(isStandby ? BooleanType.TRUE : BooleanType.FALSE)
                     .logChannel(channel);
 
                 bufferClaim.commit();
@@ -82,24 +89,30 @@ final class ServiceProxy implements AutoCloseable
                 return;
             }
 
-            checkResult(result);
+            checkResult(position, publication);
+            if (Publication.BACK_PRESSURED == position)
+            {
+                Thread.yield();
+            }
         }
         while (--attempts > 0);
 
-        throw new ClusterException("failed to send join log request");
+        throw new ClusterException("failed to send join log request: " + Publication.errorString(position));
     }
 
     void clusterMembersResponse(
-        final long correlationId, final int leaderMemberId, final String activeMembers, final String passiveFollowers)
+        final long correlationId, final int leaderMemberId, final String activeMembers)
     {
+        final String passiveFollowers = "";
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterMembersResponseEncoder.BLOCK_LENGTH +
             ClusterMembersResponseEncoder.activeMembersHeaderLength() + activeMembers.length() +
             ClusterMembersResponseEncoder.passiveFollowersHeaderLength() + passiveFollowers.length();
 
-        int attempts = SEND_ATTEMPTS * 2;
+        long result;
+        int attempts = SEND_ATTEMPTS;
         do
         {
-            final long result = publication.tryClaim(length, bufferClaim);
+            result = publication.tryClaim(length, bufferClaim);
             if (result > 0)
             {
                 clusterMembersResponseEncoder
@@ -114,11 +127,15 @@ final class ServiceProxy implements AutoCloseable
                 return;
             }
 
-            checkResult(result);
+            if (Publication.BACK_PRESSURED == result)
+            {
+                Thread.yield();
+            }
         }
         while (--attempts > 0);
 
-        throw new ClusterException("failed to send cluster members response");
+        errorHandler.onError(new ClusterEvent("failed to send cluster members response: result=" +
+            Publication.errorString(result)));
     }
 
     void clusterMembersExtendedResponse(
@@ -126,8 +143,7 @@ final class ServiceProxy implements AutoCloseable
         final long currentTimeNs,
         final int leaderMemberId,
         final int memberId,
-        final ClusterMember[] activeMembers,
-        final ClusterMember[] passiveMembers)
+        final ClusterMember[] activeMembers)
     {
         clusterMembersExtendedResponseEncoder
             .wrapAndApplyHeader(expandableArrayBuffer, 0, messageHeaderEncoder)
@@ -145,58 +161,85 @@ final class ServiceProxy implements AutoCloseable
                 .logPosition(member.logPosition())
                 .timeOfLastAppendNs(member.timeOfLastAppendPositionNs())
                 .memberId(member.id())
-                .clientFacingEndpoint(member.clientFacingEndpoint())
-                .memberFacingEndpoint(member.memberFacingEndpoint())
+                .ingressEndpoint(member.ingressEndpoint())
+                .consensusEndpoint(member.consensusEndpoint())
                 .logEndpoint(member.logEndpoint())
-                .transferEndpoint(member.transferEndpoint())
+                .catchupEndpoint(member.catchupEndpoint())
                 .archiveEndpoint(member.archiveEndpoint());
         }
 
-        final ClusterMembersExtendedResponseEncoder.PassiveMembersEncoder passiveMembersEncoder =
-            clusterMembersExtendedResponseEncoder.passiveMembersCount(passiveMembers.length);
-        for (final ClusterMember member : passiveMembers)
-        {
-            passiveMembersEncoder.next()
-                .leadershipTermId(member.leadershipTermId())
-                .logPosition(member.logPosition())
-                .timeOfLastAppendNs(member.timeOfLastAppendPositionNs())
-                .memberId(member.id())
-                .clientFacingEndpoint(member.clientFacingEndpoint())
-                .memberFacingEndpoint(member.memberFacingEndpoint())
-                .logEndpoint(member.logEndpoint())
-                .transferEndpoint(member.transferEndpoint())
-                .archiveEndpoint(member.archiveEndpoint());
-        }
+        clusterMembersExtendedResponseEncoder.passiveMembersCount(0);
 
-        final int length = clusterMembersExtendedResponseEncoder.encodedLength() + MessageHeaderEncoder.ENCODED_LENGTH;
+        final int length = MessageHeaderEncoder.ENCODED_LENGTH + clusterMembersExtendedResponseEncoder.encodedLength();
 
-        int attempts = SEND_ATTEMPTS * 2;
+        long result;
+        int attempts = SEND_ATTEMPTS;
         do
         {
-            final long result = publication.offer(expandableArrayBuffer, 0, length, null);
+            result = publication.offer(expandableArrayBuffer, 0, length, null);
             if (result > 0)
             {
                 return;
             }
 
-            checkResult(result);
+            if (Publication.BACK_PRESSURED == result)
+            {
+                Thread.yield();
+            }
         }
         while (--attempts > 0);
 
-        throw new ClusterException("failed to send cluster members extended response");
+        errorHandler.onError(new ClusterEvent("failed to send cluster members extended response: result=" +
+            Publication.errorString(result)));
     }
 
-    void terminationPosition(final long logPosition)
+    void terminationPosition(final long logPosition, final boolean ackRequired)
     {
-        final int length = MessageHeaderDecoder.ENCODED_LENGTH + ServiceTerminationPositionEncoder.BLOCK_LENGTH;
+        if (!publication.isClosed())
+        {
+            final int length = MessageHeaderDecoder.ENCODED_LENGTH + ServiceTerminationPositionEncoder.BLOCK_LENGTH;
+            long result;
 
-        int attempts = SEND_ATTEMPTS * 2;
+            int attempts = SEND_ATTEMPTS;
+            do
+            {
+                result = publication.tryClaim(length, bufferClaim);
+                if (result > 0)
+                {
+                    serviceTerminationPositionEncoder
+                        .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
+                        .logPosition(logPosition)
+                        .ackRequired(ackRequired ? BooleanType.TRUE : BooleanType.FALSE);
+
+                    bufferClaim.commit();
+
+                    return;
+                }
+
+                if (Publication.BACK_PRESSURED == result)
+                {
+                    Thread.yield();
+                }
+            }
+            while (--attempts > 0);
+
+            errorHandler.onError(new ClusterEvent(
+                "failed to send service termination position: result=" + Publication.errorString(result)));
+        }
+    }
+
+    void requestServiceAck(final long logPosition)
+    {
+        final int length = MessageHeaderEncoder.ENCODED_LENGTH + RequestServiceAckEncoder.BLOCK_LENGTH;
+
+        long result;
+        int attempts = SEND_ATTEMPTS;
         do
         {
-            final long result = publication.tryClaim(length, bufferClaim);
+            result = publication.tryClaim(length, bufferClaim);
             if (result > 0)
             {
-                serviceTerminationPositionEncoder
+                requestServiceAckEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
                     .logPosition(logPosition);
 
@@ -205,46 +248,31 @@ final class ServiceProxy implements AutoCloseable
                 return;
             }
 
-            checkResult(result);
-        }
-        while (--attempts > 0);
-
-        throw new ClusterException("failed to send service termination position");
-    }
-
-    void electionStartEvent(final long logPosition)
-    {
-        final int length = MessageHeaderDecoder.ENCODED_LENGTH + ElectionStartEventEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS * 2;
-        do
-        {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            if (Publication.BACK_PRESSURED == result)
             {
-                electionStartEventEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .logPosition(logPosition);
-
-                bufferClaim.commit();
-
-                return;
+                Thread.yield();
             }
-
-            checkResult(result);
         }
         while (--attempts > 0);
 
-        throw new ClusterException("failed to send election start event");
+        throw new ClusterException("failed to send request for service ack: result=" + Publication.errorString(result));
     }
 
-    private static void checkResult(final long result)
+    private static void checkResult(final long position, final Publication publication)
     {
-        if (result == Publication.NOT_CONNECTED ||
-            result == Publication.CLOSED ||
-            result == Publication.MAX_POSITION_EXCEEDED)
+        if (Publication.NOT_CONNECTED == position)
         {
-            throw new AeronException("unexpected publication state: " + result);
+            throw new ClusterException("publication is not connected");
+        }
+
+        if (Publication.CLOSED == position)
+        {
+            throw new ClusterException("publication is closed");
+        }
+
+        if (Publication.MAX_POSITION_EXCEEDED == position)
+        {
+            throw new ClusterException("publication at max position: term-length=" + publication.termBufferLength());
         }
     }
 }

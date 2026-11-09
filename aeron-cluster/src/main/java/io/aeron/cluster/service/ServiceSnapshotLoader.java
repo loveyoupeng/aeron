@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 package io.aeron.cluster.service;
 
 import io.aeron.Image;
-import io.aeron.cluster.client.ClusterClock;
+import io.aeron.ImageControlledFragmentAssembler;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
@@ -25,9 +25,9 @@ import org.agrona.DirectBuffer;
 
 import java.util.concurrent.TimeUnit;
 
-import static io.aeron.cluster.service.ClusteredServiceContainer.SNAPSHOT_TYPE_ID;
+import static io.aeron.cluster.service.ClusteredServiceContainer.Configuration.SNAPSHOT_TYPE_ID;
 
-class ServiceSnapshotLoader implements ControlledFragmentHandler
+final class ServiceSnapshotLoader implements ControlledFragmentHandler
 {
     private static final int FRAGMENT_LIMIT = 10;
 
@@ -39,6 +39,7 @@ class ServiceSnapshotLoader implements ControlledFragmentHandler
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final SnapshotMarkerDecoder snapshotMarkerDecoder = new SnapshotMarkerDecoder();
     private final ClientSessionDecoder clientSessionDecoder = new ClientSessionDecoder();
+    private final ImageControlledFragmentAssembler fragmentAssembler = new ImageControlledFragmentAssembler(this);
     private final Image image;
     private final ClusteredServiceAgent agent;
 
@@ -48,24 +49,24 @@ class ServiceSnapshotLoader implements ControlledFragmentHandler
         this.agent = agent;
     }
 
-    public boolean isDone()
+    boolean isDone()
     {
         return isDone;
     }
 
-    public int appVersion()
+    int appVersion()
     {
         return appVersion;
     }
 
-    public TimeUnit timeUnit()
+    TimeUnit timeUnit()
     {
         return timeUnit;
     }
 
-    public int poll()
+    int poll()
     {
-        return image.controlledPoll(this, FRAGMENT_LIMIT);
+        return image.controlledPoll(fragmentAssembler, FRAGMENT_LIMIT);
     }
 
     public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
@@ -73,13 +74,12 @@ class ServiceSnapshotLoader implements ControlledFragmentHandler
         messageHeaderDecoder.wrap(buffer, offset);
 
         final int schemaId = messageHeaderDecoder.schemaId();
-        if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
+        if (MessageHeaderDecoder.SCHEMA_ID != schemaId)
         {
             throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        final int templateId = messageHeaderDecoder.templateId();
-        switch (templateId)
+        switch (messageHeaderDecoder.templateId())
         {
             case SnapshotMarkerDecoder.TEMPLATE_ID:
                 snapshotMarkerDecoder.wrap(
@@ -89,7 +89,7 @@ class ServiceSnapshotLoader implements ControlledFragmentHandler
                     messageHeaderDecoder.version());
 
                 final long typeId = snapshotMarkerDecoder.typeId();
-                if (typeId != SNAPSHOT_TYPE_ID)
+                if (SNAPSHOT_TYPE_ID != typeId)
                 {
                     throw new ClusterException("unexpected snapshot type: " + typeId);
                 }
@@ -113,6 +113,10 @@ class ServiceSnapshotLoader implements ControlledFragmentHandler
                         }
                         isDone = true;
                         return Action.BREAK;
+
+                    case SECTION:
+                    case NULL_VAL:
+                        break;
                 }
                 break;
 

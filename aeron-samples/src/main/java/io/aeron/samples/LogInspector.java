@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,27 +36,45 @@ import static java.lang.Math.min;
 public class LogInspector
 {
     /**
-     * Data format for fragments which can be ASCII or HEX.
+     * Data format property name for fragments which can be ASCII or HEX.
      */
     public static final String AERON_LOG_DATA_FORMAT_PROP_NAME = "aeron.log.inspector.data.format";
-    public static final String AERON_LOG_DATA_FORMAT = System.getProperty(
+
+    /**
+     * Default data format for fragments derived from the system property, or HEX if not set.
+     */
+    public static final String AERON_LOG_DATA_FORMAT_DEFAULT = System.getProperty(
         AERON_LOG_DATA_FORMAT_PROP_NAME, "hex").toLowerCase();
 
     /**
-     * Should the default header be skipped for output.
+     * Property name for if the default header should be skipped for output.
      */
     public static final String AERON_LOG_SKIP_DEFAULT_HEADER_PROP_NAME = "aeron.log.inspector.skipDefaultHeader";
-    public static final boolean AERON_LOG_SKIP_DEFAULT_HEADER = Boolean.getBoolean(
-        AERON_LOG_SKIP_DEFAULT_HEADER_PROP_NAME);
 
     /**
-     * Should zeros be skipped in the output to reduce noise.
+     * Default for whether the default header should be skipped, derived from the system property.
+     */
+    public static final boolean AERON_LOG_SKIP_DEFAULT_HEADER_DEFAULT =
+        "true".equals(System.getProperty(AERON_LOG_SKIP_DEFAULT_HEADER_PROP_NAME));
+
+    /**
+     * Property name for if zeros should be skipped in the output to reduce noise.
      */
     public static final String AERON_LOG_SCAN_OVER_ZEROES_PROP_NAME = "aeron.log.inspector.scanOverZeroes";
-    public static final boolean AERON_LOG_SCAN_OVER_ZEROES = Boolean.getBoolean(AERON_LOG_SCAN_OVER_ZEROES_PROP_NAME);
 
-    public static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
+    /**
+     * Default for whether zeros should be skipped in the output, derived from the system property.
+     */
+    public static final boolean AERON_LOG_SCAN_OVER_ZEROES_DEFAULT =
+        "true".equals(System.getProperty(AERON_LOG_SCAN_OVER_ZEROES_PROP_NAME));
 
+    private static final char[] HEX_ARRAY = "0123456789ABCDEF".toCharArray();
+
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         final PrintStream out = System.out;
@@ -69,10 +87,54 @@ public class LogInspector
         final String logFileName = args[0];
         final int messageDumpLimit = args.length >= 2 ? Integer.parseInt(args[1]) : Integer.MAX_VALUE;
 
-        try (LogBuffers logBuffers = new LogBuffers(logFileName))
+        run(logFileName, messageDumpLimit,
+            AERON_LOG_DATA_FORMAT_DEFAULT,
+            AERON_LOG_SKIP_DEFAULT_HEADER_DEFAULT,
+            AERON_LOG_SCAN_OVER_ZEROES_DEFAULT);
+    }
+
+    /**
+     * Run the log inspection, printing output to {@link System#out}.
+     *
+     * @param logFileName       path to the log file to inspect.
+     * @param messageDumpLimit  maximum number of bytes to dump from each message body.
+     * @param format            output format for message body bytes: {@code "hex"} or {@code "ascii"}.
+     * @param skipDefaultHeader if {@code true}, the default frame header is omitted from the output.
+     * @param scanOverZeroes    if {@code true}, zero-length frames are skipped rather than stopping the scan.
+     */
+    public static void run(
+        final String logFileName,
+        final int messageDumpLimit,
+        final String format,
+        final boolean skipDefaultHeader,
+        final boolean scanOverZeroes)
+    {
+        run(logFileName, messageDumpLimit, format, skipDefaultHeader, scanOverZeroes, System.out);
+    }
+
+    /**
+     * Run the log inspection, printing output to the provided {@link PrintStream}.
+     *
+     * @param logFileName       path to the log file to inspect.
+     * @param messageDumpLimit  maximum number of bytes to dump from each message body.
+     * @param format            output format for message body bytes: {@code "hex"} or {@code "ascii"}.
+     * @param skipDefaultHeader if {@code true}, the default frame header is omitted from the output.
+     * @param scanOverZeroes    if {@code true}, zero-length frames are skipped rather than stopping the scan.
+     * @param out               destination for all inspection output.
+     */
+    @SuppressWarnings("methodLength")
+    public static void run(
+        final String logFileName,
+        final int messageDumpLimit,
+        final String format,
+        final boolean skipDefaultHeader,
+        final boolean scanOverZeroes,
+        final PrintStream out)
+    {
+        try (LogBuffers logBuffers = new LogBuffers(logFileName, true))
         {
             out.println("======================================================================");
-            out.format("%s Inspection dump for %s%n", new Date(), logFileName);
+            out.println(new Date() + " Inspection dump for " + logFileName);
             out.println("======================================================================");
 
             final DataHeaderFlyweight dataHeaderFlyweight = new DataHeaderFlyweight();
@@ -81,19 +143,20 @@ public class LogInspector
             final UnsafeBuffer metaDataBuffer = logBuffers.metaDataBuffer();
             final int initialTermId = initialTermId(metaDataBuffer);
 
-            out.format("   Is Connected: %s%n", isConnected(metaDataBuffer));
-            out.format("Initial term id: %d%n", initialTermId);
-            out.format("     Term Count: %d%n", activeTermCount(metaDataBuffer));
-            out.format("   Active index: %d%n", indexByTermCount(activeTermCount(metaDataBuffer)));
-            out.format("    Term length: %d%n", termLength);
-            out.format("     MTU length: %d%n", mtuLength(metaDataBuffer));
-            out.format("      Page Size: %d%n", pageSize(metaDataBuffer));
-            out.format("   EOS Position: %d%n%n", endOfStreamPosition(metaDataBuffer));
+            out.println("   Is connected: " + isConnected(metaDataBuffer));
+            out.println("Initial term id: " + initialTermId);
+            out.println("     Term count: " + activeTermCount(metaDataBuffer));
+            out.println("   Active index: " + indexByTermCount(activeTermCount(metaDataBuffer)));
+            out.println("    Term length: " + termLength);
+            out.println("     MTU length: " + mtuLength(metaDataBuffer));
+            out.println("      Page size: " + pageSize(metaDataBuffer));
+            out.println("   EOS position: " + endOfStreamPosition(metaDataBuffer));
+            out.println();
 
-            if (!AERON_LOG_SKIP_DEFAULT_HEADER)
+            if (!skipDefaultHeader)
             {
                 dataHeaderFlyweight.wrap(defaultFrameHeader(metaDataBuffer));
-                out.format("default %s%n", dataHeaderFlyweight);
+                out.println("default " + dataHeaderFlyweight);
             }
             out.println();
 
@@ -104,32 +167,33 @@ public class LogInspector
                 final int termId = termId(rawTail);
                 final int offset = (int)Math.min(termOffset, termLength);
                 final int positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termLength);
-                out.format(
-                    "Index %d Term Meta Data termOffset=%d termId=%d rawTail=%d position=%d%n",
-                    i,
-                    termOffset,
-                    termId,
-                    rawTail,
-                    LogBufferDescriptor.computePosition(termId, offset, positionBitsToShift, initialTermId));
+                final long position = computePosition(termId, offset, positionBitsToShift, initialTermId);
+
+                out.println("Index " + i + " Term Meta Data" +
+                    " termOffset=" + termOffset +
+                    " termId=" + termId +
+                    " rawTail=" + rawTail +
+                    " position=" + position);
             }
 
             for (int i = 0; i < PARTITION_COUNT; i++)
             {
                 out.println();
                 out.println("======================================================================");
-                out.format("Index %d Term Data%n%n", i);
+                out.println("Index " + i + " Term Data");
+                out.println();
 
                 final UnsafeBuffer termBuffer = termBuffers[i];
                 int offset = 0;
                 do
                 {
                     dataHeaderFlyweight.wrap(termBuffer, offset, termLength - offset);
-                    out.println(offset + ": " + dataHeaderFlyweight.toString());
+                    out.println(offset + ": " + dataHeaderFlyweight);
 
                     final int frameLength = dataHeaderFlyweight.frameLength();
                     if (frameLength < DataHeaderFlyweight.HEADER_LENGTH)
                     {
-                        if (0 == frameLength && AERON_LOG_SCAN_OVER_ZEROES)
+                        if (0 == frameLength && scanOverZeroes)
                         {
                             offset += FrameDescriptor.FRAME_ALIGNMENT;
                             continue;
@@ -138,11 +202,11 @@ public class LogInspector
                         try
                         {
                             final int limit = min(termLength - (offset + HEADER_LENGTH), messageDumpLimit);
-                            out.println(formatBytes(termBuffer, offset + HEADER_LENGTH, limit));
+                            out.println(formatBytes(termBuffer, offset + HEADER_LENGTH, limit, format));
                         }
                         catch (final Exception ex)
                         {
-                            System.err.printf("frameLength=%d offset=%d%n", frameLength, offset);
+                            System.err.println("frameLength=" + frameLength + " offset=" + offset);
                             ex.printStackTrace();
                         }
 
@@ -150,7 +214,7 @@ public class LogInspector
                     }
 
                     final int limit = min(frameLength - HEADER_LENGTH, messageDumpLimit);
-                    out.println(formatBytes(termBuffer, offset + HEADER_LENGTH, limit));
+                    out.println(formatBytes(termBuffer, offset + HEADER_LENGTH, limit, format));
 
                     offset += BitUtil.align(frameLength, FrameDescriptor.FRAME_ALIGNMENT);
                 }
@@ -159,9 +223,32 @@ public class LogInspector
         }
     }
 
+    /**
+     * Format bytes in a buffer using the default data format from {@link #AERON_LOG_DATA_FORMAT_DEFAULT}.
+     *
+     * @param buffer containing the bytes to be formatted.
+     * @param offset in the buffer at which the bytes begin.
+     * @param length of the bytes in the buffer.
+     * @return a char array of the formatted bytes.
+     */
     public static char[] formatBytes(final DirectBuffer buffer, final int offset, final int length)
     {
-        switch (AERON_LOG_DATA_FORMAT)
+        return formatBytes(buffer, offset, length, AERON_LOG_DATA_FORMAT_DEFAULT);
+    }
+
+    /**
+     * Format bytes in a buffer using the specified data format.
+     *
+     * @param buffer containing the bytes to be formatted.
+     * @param offset in the buffer at which the bytes begin.
+     * @param length of the bytes in the buffer.
+     * @param format {@code "ascii"} for ASCII output, or any other value for HEX.
+     * @return a char array of the formatted bytes.
+     */
+    public static char[] formatBytes(
+        final DirectBuffer buffer, final int offset, final int length, final String format)
+    {
+        switch (format)
         {
             case "us-ascii":
             case "us_ascii":
@@ -192,6 +279,14 @@ public class LogInspector
         return chars;
     }
 
+    /**
+     * Format bytes to HEX for printing.
+     *
+     * @param buffer containing the bytes.
+     * @param offset in the buffer at which the bytes begin.
+     * @param length of the bytes in the buffer.
+     * @return a char array of the formatted bytes in HEX.
+     */
     public static char[] bytesToHex(final DirectBuffer buffer, final int offset, final int length)
     {
         final char[] chars = new char[length * 2];

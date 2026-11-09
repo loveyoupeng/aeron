@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,21 +34,21 @@ class TermUnblockerTest : public testing::Test
 {
 public:
     TermUnblockerTest() :
-        m_log_meta_data(reinterpret_cast<aeron_logbuffer_metadata_t*>(m_log_meta_data_buffer.data()))
+        m_log_meta_data(reinterpret_cast<aeron_logbuffer_metadata_t *>(m_log_meta_data_buffer.data()))
     {
         m_term_buffer.fill(0);
         m_log_meta_data_buffer.fill(0);
     }
 
 protected:
-    buffer_t m_term_buffer;
-    log_meta_data_buffer_t m_log_meta_data_buffer;
-    aeron_logbuffer_metadata_t *m_log_meta_data;
+    buffer_t m_term_buffer = {};
+    log_meta_data_buffer_t m_log_meta_data_buffer = {};
+    aeron_logbuffer_metadata_t *m_log_meta_data = nullptr;
 };
 
 TEST_F(TermUnblockerTest, shouldTakeNoActionWhenMessageIsComplete)
 {
-    aeron_frame_header_t *frame_header = (aeron_frame_header_t *)m_term_buffer.data();
+    auto *frame_header = (aeron_frame_header_t *)m_term_buffer.data();
 
     frame_header->frame_length = AERON_DATA_HEADER_LENGTH;
 
@@ -75,7 +75,7 @@ TEST_F(TermUnblockerTest, shouldTakeNoActionWhenNoUnblockedMessage)
 TEST_F(TermUnblockerTest, shouldPatchNonCommittedMessage)
 {
     int32_t message_length = AERON_DATA_HEADER_LENGTH * 4;
-    aeron_data_header_t *data_header = (aeron_data_header_t *)m_term_buffer.data();
+    auto *data_header = (aeron_data_header_t *)m_term_buffer.data();
 
     data_header->frame_header.frame_length = -message_length;
 
@@ -97,7 +97,7 @@ TEST_F(TermUnblockerTest, shouldPatchToEndOfPartition)
     int32_t term_offset = TERM_LENGTH - message_length;
     int32_t tail_offset = TERM_LENGTH;
 
-    aeron_data_header_t *data_header = (aeron_data_header_t *)(m_term_buffer.data() + term_offset);
+    auto *data_header = (aeron_data_header_t *)(m_term_buffer.data() + term_offset);
 
     EXPECT_EQ(
         aeron_term_unblocker_unblock(
@@ -158,7 +158,7 @@ class LogBufferUnblockerTest : public TermUnblockerTest
 {
 public:
     LogBufferUnblockerTest() :
-        m_log_meta_data(reinterpret_cast<aeron_logbuffer_metadata_t*>(m_log_meta_data_buffer.data()))
+        m_log_meta_data(reinterpret_cast<aeron_logbuffer_metadata_t *>(m_log_meta_data_buffer.data()))
     {
         for (size_t i = 0; i < AERON_LOGBUFFER_PARTITION_COUNT; i++)
         {
@@ -180,17 +180,18 @@ public:
     }
 
 protected:
-    buffer_t m_term_buffers[AERON_LOGBUFFER_PARTITION_COUNT];
-    aeron_mapped_buffer_t m_mapped_buffers[AERON_LOGBUFFER_PARTITION_COUNT];
-    log_meta_data_buffer_t m_log_meta_data_buffer;
-    aeron_logbuffer_metadata_t *m_log_meta_data;
-    size_t m_position_bits_to_shift;
+    buffer_t m_term_buffers[AERON_LOGBUFFER_PARTITION_COUNT] = {};
+    aeron_mapped_buffer_t m_mapped_buffers[AERON_LOGBUFFER_PARTITION_COUNT] = {};
+    log_meta_data_buffer_t m_log_meta_data_buffer = {};
+    aeron_logbuffer_metadata_t *m_log_meta_data = nullptr;
+    size_t m_position_bits_to_shift = 0;
 };
 
 TEST_F(LogBufferUnblockerTest, shouldNotUnblockWhenPositionHasCompleteMessage)
 {
     int32_t blocked_offset = AERON_DATA_HEADER_LENGTH * 4;
-    int64_t blocked_position = aeron_logbuffer_compute_position(TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
+    int64_t blocked_position = aeron_logbuffer_compute_position(
+        TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
     const size_t active_index = aeron_logbuffer_index_by_position(blocked_position, m_position_bits_to_shift);
 
     aeron_data_header_t *data_header;
@@ -212,7 +213,8 @@ TEST_F(LogBufferUnblockerTest, shouldUnblockWhenPositionHasNonCommittedMessageAn
 {
     int32_t blocked_offset = AERON_DATA_HEADER_LENGTH * 4;
     int32_t message_length = AERON_DATA_HEADER_LENGTH * 4;
-    int64_t blocked_position = aeron_logbuffer_compute_position(TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
+    int64_t blocked_position = aeron_logbuffer_compute_position(
+        TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
     const size_t active_index = aeron_logbuffer_index_by_position(blocked_position, m_position_bits_to_shift);
 
     aeron_data_header_t *data_header;
@@ -234,7 +236,8 @@ TEST_F(LogBufferUnblockerTest, shouldUnblockWhenPositionHasNonCommittedMessageAn
 {
     int32_t message_length = AERON_DATA_HEADER_LENGTH * 4;
     int32_t blocked_offset = TERM_LENGTH - message_length;
-    int64_t blocked_position = aeron_logbuffer_compute_position(TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
+    int64_t blocked_position = aeron_logbuffer_compute_position(
+        TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
 
     m_log_meta_data->term_tail_counters[0] = (int64_t)TERM_ID << 32 | TERM_LENGTH;
 
@@ -272,7 +275,8 @@ TEST_F(LogBufferUnblockerTest, shouldUnblockWhenPositionHasNonCommittedMessageAn
 {
     int32_t message_length = AERON_DATA_HEADER_LENGTH * 4;
     int32_t blocked_offset = TERM_LENGTH - message_length;
-    int64_t blocked_position = aeron_logbuffer_compute_position(TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
+    int64_t blocked_position = aeron_logbuffer_compute_position(
+        TERM_ID, blocked_offset, m_position_bits_to_shift, TERM_ID);
 
     m_log_meta_data->term_tail_counters[0] = (int64_t)TERM_ID << 32 | (TERM_LENGTH + AERON_DATA_HEADER_LENGTH);
 

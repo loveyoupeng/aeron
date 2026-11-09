@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,9 +24,9 @@ import java.util.Arrays;
  */
 public final class DirectBufferVector
 {
-    public DirectBuffer buffer;
-    public int offset;
-    public int length;
+    private DirectBuffer buffer;
+    private int offset;
+    private int length;
 
     /**
      * Default constructor so the fluent API can be used.
@@ -156,6 +156,10 @@ public final class DirectBufferVector
         return this;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "DirectBufferVector{" +

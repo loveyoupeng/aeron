@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,43 +15,41 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.Publication;
+import io.aeron.Aeron;
+import io.aeron.ExclusivePublication;
 import io.aeron.cluster.codecs.*;
 import io.aeron.cluster.service.SnapshotTaker;
+import io.aeron.exceptions.AeronEvent;
+import io.aeron.exceptions.AeronException;
+import org.agrona.ErrorHandler;
+import org.agrona.ExpandableArrayBuffer;
 import org.agrona.ExpandableRingBuffer;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.AgentInvoker;
 import org.agrona.concurrent.IdleStrategy;
 
-class ConsensusModuleSnapshotTaker extends SnapshotTaker implements ExpandableRingBuffer.MessageConsumer
+class ConsensusModuleSnapshotTaker
+    extends SnapshotTaker
+    implements ExpandableRingBuffer.MessageConsumer, TimerService.TimerSnapshotTaker
 {
     private static final int ENCODED_TIMER_LENGTH = MessageHeaderEncoder.ENCODED_LENGTH + TimerEncoder.BLOCK_LENGTH;
 
+    private final ExpandableArrayBuffer offerBuffer = new ExpandableArrayBuffer(1024);
     private final ClusterSessionEncoder clusterSessionEncoder = new ClusterSessionEncoder();
     private final TimerEncoder timerEncoder = new TimerEncoder();
     private final ConsensusModuleEncoder consensusModuleEncoder = new ConsensusModuleEncoder();
-    private final ClusterMembersEncoder clusterMembersEncoder = new ClusterMembersEncoder();
+
+    private final PendingMessageTrackerEncoder pendingMessageTrackerEncoder = new PendingMessageTrackerEncoder();
 
     ConsensusModuleSnapshotTaker(
-        final Publication publication, final IdleStrategy idleStrategy, final AgentInvoker aeronClientInvoker)
+        final ExclusivePublication publication, final IdleStrategy idleStrategy, final AgentInvoker aeronClientInvoker)
     {
         super(publication, idleStrategy, aeronClientInvoker);
     }
 
     public boolean onMessage(final MutableDirectBuffer buffer, final int offset, final int length, final int headOffset)
     {
-        idleStrategy.reset();
-        while (true)
-        {
-            final long result = publication.offer(buffer, offset, length);
-            if (result > 0)
-            {
-                break;
-            }
-
-            checkResultAndIdle(result);
-        }
-
+        offer(buffer, offset, length);
         return true;
     }
 
@@ -90,31 +88,31 @@ class ConsensusModuleSnapshotTaker extends SnapshotTaker implements ExpandableRi
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterSessionEncoder.BLOCK_LENGTH +
             ClusterSessionEncoder.responseChannelHeaderLength() + responseChannel.length();
 
-        idleStrategy.reset();
-        while (true)
+        if (length <= publication.maxPayloadLength())
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
+            idleStrategy.reset();
+            while (true)
             {
-                clusterSessionEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .clusterSessionId(session.id())
-                    .correlationId(session.correlationId())
-                    .openedLogPosition(session.openedLogPosition())
-                    .timeOfLastActivity(session.timeOfLastActivityNs())
-                    .closeReason(session.closeReason())
-                    .responseStreamId(session.responseStreamId())
-                    .responseChannel(responseChannel);
+                final long result = publication.tryClaim(length, bufferClaim);
+                if (result > 0)
+                {
+                    encodeSession(session, responseChannel, bufferClaim.buffer(), bufferClaim.offset());
+                    bufferClaim.commit();
+                    break;
+                }
 
-                bufferClaim.commit();
-                break;
+                checkResultAndIdle(result);
             }
-
-            checkResultAndIdle(result);
+        }
+        else
+        {
+            final int offset = 0;
+            encodeSession(session, responseChannel, offerBuffer, offset);
+            offer(offerBuffer, offset, length);
         }
     }
 
-    void snapshotTimer(final long correlationId, final long deadline)
+    public void snapshotTimer(final long correlationId, final long deadline)
     {
         idleStrategy.reset();
         while (true)
@@ -126,7 +124,6 @@ class ConsensusModuleSnapshotTaker extends SnapshotTaker implements ExpandableRi
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
                     .correlationId(correlationId)
                     .deadline(deadline);
-
                 bufferClaim.commit();
                 break;
             }
@@ -135,11 +132,10 @@ class ConsensusModuleSnapshotTaker extends SnapshotTaker implements ExpandableRi
         }
     }
 
-    void snapshotClusterMembers(final int memberId, final int highMemberId, final ClusterMember[] members)
+    void snapshot(final PendingServiceMessageTracker tracker, final ErrorHandler errorHandler)
     {
-        final String clusterMembers = ClusterMember.encodeAsString(members);
-        final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterMembersEncoder.BLOCK_LENGTH +
-            ClusterMembersEncoder.clusterMembersHeaderLength() + clusterMembers.length();
+        final int length = MessageHeaderEncoder.ENCODED_LENGTH + PendingMessageTrackerEncoder.BLOCK_LENGTH;
+        final long nextServiceSessionId = correctNextServiceSessionId(tracker, errorHandler);
 
         idleStrategy.reset();
         while (true)
@@ -147,22 +143,52 @@ class ConsensusModuleSnapshotTaker extends SnapshotTaker implements ExpandableRi
             final long result = publication.tryClaim(length, bufferClaim);
             if (result > 0)
             {
-                clusterMembersEncoder
+                pendingMessageTrackerEncoder
                     .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .memberId(memberId)
-                    .highMemberId(highMemberId)
-                    .clusterMembers(clusterMembers);
-
+                    .nextServiceSessionId(nextServiceSessionId)
+                    .logServiceSessionId(tracker.logServiceSessionId())
+                    .pendingMessageCapacity(tracker.pendingMessages().size())
+                    .serviceId(tracker.serviceId());
                 bufferClaim.commit();
                 break;
             }
 
             checkResultAndIdle(result);
         }
+
+        tracker.pendingMessages().forEach(this, Integer.MAX_VALUE);
     }
 
-    void snapshot(final ExpandableRingBuffer pendingServiceMessages)
+    private void encodeSession(
+        final ClusterSession session, final String responseChannel, final MutableDirectBuffer buffer, final int offset)
     {
-        pendingServiceMessages.forEach(this, Integer.MAX_VALUE);
+        clusterSessionEncoder
+            .wrapAndApplyHeader(buffer, offset, messageHeaderEncoder)
+            .clusterSessionId(session.id())
+            .correlationId(session.correlationId())
+            .openedLogPosition(session.openedLogPosition())
+            .timeOfLastActivity(Aeron.NULL_VALUE)
+            .closeReason(session.closeReason())
+            .responseStreamId(session.responseStreamId())
+            .responseChannel(responseChannel);
+    }
+
+    private static long correctNextServiceSessionId(
+        final PendingServiceMessageTracker tracker,
+        final ErrorHandler errorHandler)
+    {
+        final long nextServiceSessionId = tracker.pendingMessages().isEmpty() ?
+            tracker.logServiceSessionId() + 1 : tracker.nextServiceSessionId();
+        final long missedServiceMessageCount = nextServiceSessionId - tracker.nextServiceSessionId();
+
+        if (0 < missedServiceMessageCount)
+        {
+            final String message = "Follower has missed " + missedServiceMessageCount +
+                " service message(s).  Please check service (id=" + tracker.serviceId() +
+                ") determinism around the use of Cluster::offer";
+            errorHandler.onError(new AeronEvent(message, AeronException.Category.ERROR));
+        }
+
+        return nextServiceSessionId;
     }
 }

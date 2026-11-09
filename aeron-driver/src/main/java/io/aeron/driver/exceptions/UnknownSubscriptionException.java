@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,12 +15,23 @@
  */
 package io.aeron.driver.exceptions;
 
-import io.aeron.exceptions.AeronException;
+import io.aeron.ErrorCode;
+import io.aeron.exceptions.ControlProtocolException;
 
-public class UnknownSubscriptionException extends AeronException
+/**
+ * Indicates the subscription is unknown to the driver when a request to remove it has been received.
+ */
+public class UnknownSubscriptionException extends ControlProtocolException
 {
+    private static final long serialVersionUID = 8934006869519172332L;
+
+    /**
+     * Exception with provided message and {@link io.aeron.exceptions.AeronException.Category#ERROR}.
+     *
+     * @param message to detail the exception.
+     */
     public UnknownSubscriptionException(final String message)
     {
-        super(message);
+        super(ErrorCode.UNKNOWN_SUBSCRIPTION, message);
     }
 }

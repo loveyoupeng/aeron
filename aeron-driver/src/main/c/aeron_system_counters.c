@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,14 @@
  * limitations under the License.
  */
 
+#if defined(__linux__)
+#define _BSD_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <string.h>
 #include <errno.h>
+#include <inttypes.h>
 #include "util/aeron_error.h"
 #include "aeron_system_counters.h"
 #include "aeron_alloc.h"
@@ -37,49 +43,79 @@ static aeron_system_counter_t system_counters[] =
         { "Flow control under runs", AERON_SYSTEM_COUNTER_FLOW_CONTROL_UNDER_RUNS },
         { "Flow control over runs", AERON_SYSTEM_COUNTER_FLOW_CONTROL_OVER_RUNS },
         { "Invalid packets", AERON_SYSTEM_COUNTER_INVALID_PACKETS },
-        { "Errors", AERON_SYSTEM_COUNTER_ERRORS },
+        { "Errors: version=" AERON_VERSION_TXT " commit=" AERON_VERSION_GITSHA, AERON_SYSTEM_COUNTER_ERRORS },
         { "Short sends", AERON_SYSTEM_COUNTER_SHORT_SENDS },
-        { "Failed attempt to free log buffers", AERON_SYSTEM_COUNTER_FREE_FAILS },
+        { "Failed attempts to free log buffers", AERON_SYSTEM_COUNTER_FREE_FAILS },
         { "Sender flow control limits, i.e. back-pressure events", AERON_SYSTEM_COUNTER_SENDER_FLOW_CONTROL_LIMITS },
         { "Unblocked Publications", AERON_SYSTEM_COUNTER_UNBLOCKED_PUBLICATIONS },
         { "Unblocked Control Commands", AERON_SYSTEM_COUNTER_UNBLOCKED_COMMANDS },
         { "Possible TTL Asymmetry", AERON_SYSTEM_COUNTER_POSSIBLE_TTL_ASYMMETRY },
         { "ControllableIdleStrategy status", AERON_SYSTEM_COUNTER_CONTROLLABLE_IDLE_STRATEGY },
-        { "Loss gap fills", AERON_SYSTEM_COUNTER_LOSS_GAP_FILLS},
-        { "Client liveness timeouts", AERON_SYSTEM_COUNTER_CLIENT_TIMEOUTS}
+        { "Loss gap fills", AERON_SYSTEM_COUNTER_LOSS_GAP_FILLS },
+        { "Client liveness timeouts", AERON_SYSTEM_COUNTER_CLIENT_TIMEOUTS },
+        { "Resolution changes", AERON_SYSTEM_COUNTER_RESOLUTION_CHANGES },
+        { "Conductor max cycle time doing its work in ns", AERON_SYSTEM_COUNTER_CONDUCTOR_MAX_CYCLE_TIME },
+        { "Conductor work cycle exceeded threshold count", AERON_SYSTEM_COUNTER_CONDUCTOR_CYCLE_TIME_THRESHOLD_EXCEEDED },
+        { "Sender max cycle time doing its work in ns", AERON_SYSTEM_COUNTER_SENDER_MAX_CYCLE_TIME },
+        { "Sender work cycle exceeded threshold count", AERON_SYSTEM_COUNTER_SENDER_CYCLE_TIME_THRESHOLD_EXCEEDED },
+        { "Receiver max cycle time doing its work in ns", AERON_SYSTEM_COUNTER_RECEIVER_MAX_CYCLE_TIME },
+        { "Receiver work cycle exceeded threshold count", AERON_SYSTEM_COUNTER_RECEIVER_CYCLE_TIME_THRESHOLD_EXCEEDED },
+        { "NameResolver max time in ns", AERON_SYSTEM_COUNTER_NAME_RESOLVER_MAX_TIME },
+        { "NameResolver exceeded threshold count", AERON_SYSTEM_COUNTER_NAME_RESOLVER_TIME_THRESHOLD_EXCEEDED },
+        { "Aeron software: version=" AERON_VERSION_TXT " commit=" AERON_VERSION_GITSHA, AERON_SYSTEM_COUNTER_AERON_VERSION },
+        { "Bytes currently mapped", AERON_SYSTEM_COUNTER_BYTES_CURRENTLY_MAPPED },
+        { "Retransmitted bytes", AERON_SYSTEM_COUNTER_RETRANSMITTED_BYTES },
+        { "Retransmit Pool Overflow count", AERON_SYSTEM_COUNTER_RETRANSMIT_OVERFLOW },
+        { "Error Frames received", AERON_SYSTEM_COUNTER_ERROR_FRAMES_RECEIVED },
+        { "Error Frames sent", AERON_SYSTEM_COUNTER_ERROR_FRAMES_SENT },
+        { "Publications Revoked", AERON_SYSTEM_COUNTER_PUBLICATIONS_REVOKED },
+        { "Publication Images Revoked", AERON_SYSTEM_COUNTER_PUBLICATION_IMAGES_REVOKED },
+        { "Images rejected", AERON_SYSTEM_COUNTER_IMAGES_REJECTED },
+        { "Control protocol version", AERON_SYSTEM_COUNTER_CONTROL_PROTOCOL_VERSION },
+        { "Status Messages rejected", AERON_SYSTEM_COUNTER_STATUS_MESSAGES_REJECTED },
+        { "Failed offers to NativeResourceAgentProxy", AERON_SYSTEM_COUNTER_NATIVE_RESOURCE_AGENT_PROXY_FAILS },
     };
 
 static size_t num_system_counters = sizeof(system_counters) / sizeof(aeron_system_counter_t);
+
+#ifdef AERON_COMPILER_GCC
+_Static_assert(
+    AERON_SYSTEM_COUNTER_DUMMY_LAST == sizeof(system_counters) / sizeof(aeron_system_counter_t),
+    "Please add counters in aeron_system_counter_t enum to the system_counters table");
+#endif
 
 int aeron_system_counters_init(aeron_system_counters_t *counters, aeron_counters_manager_t *manager)
 {
     if (NULL == counters || NULL == manager)
     {
-        aeron_set_err(EINVAL, "%s:%d: %s", __FILE__, __LINE__, strerror(EINVAL));
+        AERON_SET_ERR(
+            EINVAL, "counters=%s, manager=%s", NULL == counters ? "NULL" : "OK", NULL == manager ? "NULL" : "OK");
         return -1;
     }
 
     counters->manager = manager;
-    if (aeron_alloc((void **)&counters->counter_ids, sizeof(int32_t) * num_system_counters) < 0)
-    {
-        int errcode = errno;
 
-        aeron_set_err(errcode, "%s:%d: %s", __FILE__, __LINE__, strerror(errcode));
-        return -1;
-    }
-
-    for (int32_t i = 0; i < (int32_t)num_system_counters; i++)
+    for (size_t i = 0; i < num_system_counters; i++)
     {
-        if ((counters->counter_ids[i] = aeron_counters_manager_allocate(
-             manager,
-             AERON_SYSTEM_COUNTER_TYPE_ID,
-             (const uint8_t *)&(system_counters[i].id),
-             sizeof(system_counters[i].id),
-             system_counters[i].label,
-             strlen(system_counters[i].label))) < 0)
+        const int32_t counter_id = aeron_counters_manager_allocate(
+            manager,
+            AERON_COUNTER_SYSTEM_COUNTER_TYPE_ID,
+            (const uint8_t *) &(system_counters[i].id),
+            sizeof(system_counters[i].id),
+            system_counters[i].label,
+            strlen(system_counters[i].label));
+
+        if (counter_id < 0 || counter_id != system_counters[i].id)
         {
+            AERON_APPEND_ERR(
+                "Failed to allocate system counter: id=%" PRIi32 ", label=%s",
+                system_counters[i].id,
+                system_counters[i].label);
             return -1;
         }
+
+        aeron_counters_manager_counter_registration_id(manager, counter_id, counter_id);
+        aeron_counters_manager_counter_owner_id(manager, counter_id, AERON_NULL_VALUE);
     }
 
     return 0;
@@ -89,10 +125,8 @@ void aeron_system_counters_close(aeron_system_counters_t *counters)
 {
     for (int32_t i = 0; i < (int32_t)num_system_counters; i++)
     {
-        aeron_counters_manager_free(counters->manager, counters->counter_ids[i]);
+        aeron_counters_manager_free(counters->manager, system_counters[i].id);
     }
-
-    aeron_free(counters->counter_ids);
 }
 
 extern int64_t *aeron_system_counter_addr(aeron_system_counters_t *counters, aeron_system_counter_enum_t type);

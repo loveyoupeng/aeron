@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,11 @@
  */
 package io.aeron.driver;
 
+import io.aeron.driver.media.UdpChannel;
+import io.aeron.protocol.ErrorFlyweight;
+import io.aeron.protocol.SetupFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
+import org.agrona.concurrent.status.CountersManager;
 
 import java.net.InetSocketAddress;
 
@@ -29,11 +33,22 @@ import static io.aeron.logbuffer.LogBufferDescriptor.computePosition;
  */
 public class UnicastFlowControl implements FlowControl
 {
-    private long lastPosition = 0;
+    /**
+     * Multiple of receiver window to allow for a retransmit action.
+     */
+    private int retransmitReceiverWindowMultiple;
+
+    /**
+     * Default constructor.
+     */
+    public UnicastFlowControl()
+    {
+    }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onStatusMessage(
         final StatusMessageFlyweight flyweight,
         final InetSocketAddress receiverAddress,
@@ -48,23 +63,99 @@ public class UnicastFlowControl implements FlowControl
             positionBitsToShift,
             initialTermId);
 
-        lastPosition = Math.max(lastPosition, position);
-
         return Math.max(senderLimit, position + flyweight.receiverWindowLength());
     }
 
     /**
      * {@inheritDoc}
      */
-    public void initialize(final int initialTermId, final int termBufferLength)
+    @Override
+    public void onTriggerSendSetup(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs)
     {
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
+    public long onSetup(
+        final SetupFlyweight flyweight,
+        final long senderLimit,
+        final long senderPosition,
+        final int positionBitsToShift,
+        final long timeNs)
+    {
+        return senderLimit;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void onError(final ErrorFlyweight errorFlyweight, final InetSocketAddress receiverAddress, final long timeNs)
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void initialize(
+        final MediaDriver.Context context,
+        final CountersManager countersManager,
+        final UdpChannel udpChannel,
+        final int streamId,
+        final int sessionId,
+        final long registrationId,
+        final int initialTermId,
+        final int termBufferLength)
+    {
+        retransmitReceiverWindowMultiple = FlowControl.retransmitReceiverWindowMultiple(
+            udpChannel,
+            context.unicastFlowControlRetransmitReceiverWindowMultiple()
+        );
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long onIdle(final long timeNs, final long senderLimit, final long senderPosition, final boolean isEos)
     {
         return senderLimit;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public boolean hasRequiredReceivers()
+    {
+        return true;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public int maxRetransmissionLength(
+        final int termOffset,
+        final int resendLength,
+        final int termBufferLength,
+        final int mtuLength)
+    {
+        return FlowControl.calculateRetransmissionLength(
+            resendLength, termBufferLength, termOffset, retransmitReceiverWindowMultiple);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,29 +17,31 @@ package io.aeron.driver;
 
 import io.aeron.CommonContext;
 import io.aeron.driver.media.ReceiveChannelEndpoint;
-import io.aeron.driver.media.UdpChannel;
 import org.agrona.concurrent.status.ReadablePosition;
 
 import java.util.IdentityHashMap;
+import java.util.Map;
 
 /**
- * Subscription registration from a client used for liveness tracking
+ * Subscription registration from a client used for liveness tracking.
  */
 public abstract class SubscriptionLink implements DriverManagedResource
 {
-    protected final long registrationId;
-    protected final int streamId;
-    protected final int sessionId;
-    protected final boolean hasSessionId;
-    protected final boolean isSparse;
-    protected final boolean isTether;
-    protected boolean reachedEndOfLife = false;
-    protected final CommonContext.InferableBoolean group;
-    protected final String channel;
-    protected final AeronClient aeronClient;
-    protected final IdentityHashMap<Subscribable, ReadablePosition> positionBySubscribableMap;
+    final long registrationId;
+    final int streamId;
+    final boolean isSparse;
+    final boolean isTether;
+    final boolean isResponse;
+    final boolean isRejoin;
+    final CommonContext.InferableBoolean group;
+    final String channel;
+    final AeronClient aeronClient;
+    final IdentityHashMap<Subscribable, ReadablePosition> positionBySubscribableMap;
+    int sessionId;
+    boolean hasSessionId;
+    boolean reachedEndOfLife = false;
 
-    protected SubscriptionLink(
+    SubscriptionLink(
         final long registrationId,
         final int streamId,
         final String channel,
@@ -55,111 +57,175 @@ public abstract class SubscriptionLink implements DriverManagedResource
         this.isSparse = params.isSparse;
         this.isTether = params.isTether;
         this.group = params.group;
+        this.isResponse = params.isResponse;
+        this.isRejoin = params.isRejoin;
 
         positionBySubscribableMap = new IdentityHashMap<>(hasSessionId ? 1 : 8);
     }
 
-    public long registrationId()
-    {
-        return registrationId;
-    }
-
-    public int streamId()
-    {
-        return streamId;
-    }
-
-    public int sessionId()
-    {
-        return sessionId;
-    }
-
-    public String channel()
+    /**
+     * Channel URI the subscription is on.
+     *
+     * @return channel URI the subscription is on.
+     */
+    public final String channel()
     {
         return channel;
     }
 
-    public ReceiveChannelEndpoint channelEndpoint()
+    /**
+     * Stream id the subscription is on.
+     *
+     * @return stream id the subscription is on.
+     */
+    public final int streamId()
+    {
+        return streamId;
+    }
+
+    /**
+     * Registration id of the subscription.
+     *
+     * @return registration id of the subscription.
+     */
+    public final long registrationId()
+    {
+        return registrationId;
+    }
+
+    AeronClient aeronClient()
+    {
+        return aeronClient;
+    }
+
+    final int sessionId()
+    {
+        return sessionId;
+    }
+
+    void sessionId(final int sessionId, final boolean hasSessionId)
+    {
+        this.hasSessionId = hasSessionId;
+        this.sessionId = sessionId;
+    }
+
+    boolean isResponse()
+    {
+        return isResponse;
+    }
+
+    ReceiveChannelEndpoint channelEndpoint()
     {
         return null;
     }
 
-    public boolean isReliable()
+    boolean isReliable()
     {
         return true;
     }
 
-    public boolean isRejoin()
+    boolean isRejoin()
     {
-        return true;
+        return isRejoin;
     }
 
-    public boolean isTether()
+    boolean isTether()
     {
         return isTether;
     }
 
-    public boolean isSparse()
+    boolean isSparse()
     {
         return isSparse;
     }
 
-    public CommonContext.InferableBoolean group()
+    CommonContext.InferableBoolean group()
     {
         return group;
     }
 
-    public boolean hasSessionId()
+    boolean hasSessionId()
     {
         return hasSessionId;
     }
 
-    public boolean matches(final NetworkPublication publication)
+    boolean matches(final NetworkPublication publication)
     {
         return false;
     }
 
-    public boolean matches(final PublicationImage image)
+    boolean matches(final PublicationImage image)
     {
         return false;
     }
 
-    public boolean matches(final IpcPublication publication)
+    boolean matches(final IpcPublication publication)
     {
         return false;
     }
 
-    public boolean matches(
-        final ReceiveChannelEndpoint channelEndpoint, final int streamId, final SubscriptionParams params)
+    boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final SubscriptionParams params)
     {
         return false;
     }
 
-    public boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)
+    boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)
     {
         return false;
     }
 
-    public boolean isLinked(final Subscribable subscribable)
+    boolean isLinked(final Subscribable subscribable)
     {
         return positionBySubscribableMap.containsKey(subscribable);
     }
 
-    public void link(final Subscribable subscribable, final ReadablePosition position)
+    void link(final Subscribable subscribable, final ReadablePosition position)
     {
         positionBySubscribableMap.put(subscribable, position);
     }
 
-    public void unlink(final Subscribable subscribable)
+    void unlink(final Subscribable subscribable)
     {
         positionBySubscribableMap.remove(subscribable);
     }
 
-    public void close()
+    boolean isWildcardOrSessionIdMatch(final int sessionId)
     {
-        positionBySubscribableMap.forEach((subscribable, position) -> subscribable.removeSubscriber(this, position));
+        return (!hasSessionId && !isResponse()) || this.sessionId == sessionId;
     }
 
+    boolean supportsMds()
+    {
+        return false;
+    }
+
+    void notifyUnavailableImages(final DriverConductor conductor)
+    {
+        for (final Map.Entry<Subscribable, ReadablePosition> entry : positionBySubscribableMap.entrySet())
+        {
+            final Subscribable subscribable = entry.getKey();
+            conductor.notifyUnavailableImageLink(subscribable.subscribableRegistrationId(), this);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close()
+    {
+        for (final Map.Entry<Subscribable, ReadablePosition> entry : positionBySubscribableMap.entrySet())
+        {
+            final Subscribable subscribable = entry.getKey();
+            final ReadablePosition position = entry.getValue();
+            subscribable.removeSubscriber(this, position);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onTimeEvent(final long timeNs, final long timeMs, final DriverConductor conductor)
     {
         if (aeronClient.hasTimedOut())
@@ -169,136 +235,36 @@ public abstract class SubscriptionLink implements DriverManagedResource
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean hasReachedEndOfLife()
     {
         return reachedEndOfLife;
     }
 
-    public boolean isWildcardOrSessionIdMatch(final int sessionId)
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
     {
-        return !hasSessionId || this.sessionId == sessionId;
+        return this.getClass().getName() + "{" +
+            "registrationId=" + registrationId +
+            ", streamId=" + streamId +
+            ", sessionId=" + sessionId +
+            ", hasSessionId=" + hasSessionId +
+            ", isReliable=" + isReliable() +
+            ", isSparse=" + isSparse() +
+            ", isTether=" + isTether() +
+            ", isRejoin=" + isRejoin() +
+            ", reachedEndOfLife=" + reachedEndOfLife +
+            ", group=" + group +
+            ", channel='" + channel + '\'' +
+            ", aeronClient=" + aeronClient +
+            ", positionBySubscribableMap=" + positionBySubscribableMap +
+            '}';
     }
 }
 
-class NetworkSubscriptionLink extends SubscriptionLink
-{
-    private final boolean isReliable;
-    private final boolean isRejoin;
-    private final ReceiveChannelEndpoint channelEndpoint;
-
-    NetworkSubscriptionLink(
-        final long registrationId,
-        final ReceiveChannelEndpoint channelEndpoint,
-        final int streamId,
-        final String channelUri,
-        final AeronClient aeronClient,
-        final SubscriptionParams params)
-    {
-        super(registrationId, streamId, channelUri, aeronClient, params);
-
-        this.isReliable = params.isReliable;
-        this.isRejoin = params.isRejoin;
-        this.channelEndpoint = channelEndpoint;
-    }
-
-    public boolean isReliable()
-    {
-        return isReliable;
-    }
-
-    public boolean isRejoin()
-    {
-        return isRejoin;
-    }
-
-    public ReceiveChannelEndpoint channelEndpoint()
-    {
-        return channelEndpoint;
-    }
-
-    public boolean matches(final PublicationImage image)
-    {
-        return image.channelEndpoint() == this.channelEndpoint &&
-            image.streamId() == this.streamId &&
-            isWildcardOrSessionIdMatch(image.sessionId());
-    }
-
-    public boolean matches(
-        final ReceiveChannelEndpoint channelEndpoint, final int streamId, final SubscriptionParams params)
-    {
-        final boolean isExactWildcardOrSessionIdMatch =
-            hasSessionId == params.hasSessionId && (!hasSessionId || this.sessionId == params.sessionId);
-
-        return channelEndpoint == this.channelEndpoint &&
-            streamId == this.streamId &&
-            isExactWildcardOrSessionIdMatch;
-    }
-
-    public boolean matches(final ReceiveChannelEndpoint channelEndpoint, final int streamId, final int sessionId)
-    {
-        return channelEndpoint == this.channelEndpoint &&
-            streamId == this.streamId &&
-            isWildcardOrSessionIdMatch(sessionId);
-    }
-}
-
-class IpcSubscriptionLink extends SubscriptionLink
-{
-    IpcSubscriptionLink(
-        final long registrationId,
-        final int streamId,
-        final String channelUri,
-        final AeronClient aeronClient,
-        final SubscriptionParams params)
-    {
-        super(registrationId, streamId, channelUri, aeronClient, params);
-    }
-
-    public boolean matches(final IpcPublication publication)
-    {
-        return publication.streamId() == streamId && isWildcardOrSessionIdMatch(publication.sessionId());
-    }
-}
-
-class SpySubscriptionLink extends SubscriptionLink
-{
-    private final UdpChannel udpChannel;
-
-    SpySubscriptionLink(
-        final long registrationId,
-        final UdpChannel spiedChannel,
-        final int streamId,
-        final AeronClient aeronClient,
-        final SubscriptionParams params)
-    {
-        super(registrationId, streamId, spiedChannel.originalUriString(), aeronClient, params);
-
-        this.udpChannel = spiedChannel;
-    }
-
-    public boolean matches(final NetworkPublication publication)
-    {
-        return streamId == publication.streamId() &&
-            isWildcardOrSessionIdMatch(publication.sessionId()) &&
-            udpChannel.canonicalForm().equals(publication.channelEndpoint().udpChannel().canonicalForm());
-    }
-}
-
-class UntetheredSubscription
-{
-    static final int ACTIVE = 0;
-    static final int LINGER = 1;
-    static final int RESTING = 2;
-
-    int state = ACTIVE;
-    long timeOfLastUpdateNs;
-    final SubscriptionLink subscriptionLink;
-    final ReadablePosition position;
-
-    UntetheredSubscription(final SubscriptionLink subscriptionLink, final ReadablePosition position, final long timeNs)
-    {
-        this.subscriptionLink = subscriptionLink;
-        this.position = position;
-        this.timeOfLastUpdateNs = timeNs;
-    }
-}

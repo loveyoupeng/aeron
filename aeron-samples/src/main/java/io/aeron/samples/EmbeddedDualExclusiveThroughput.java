@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,6 @@ package io.aeron.samples;
 import io.aeron.*;
 import io.aeron.driver.MediaDriver;
 import io.aeron.logbuffer.BufferClaim;
-import io.aeron.logbuffer.FragmentHandler;
 import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
 import org.agrona.concurrent.IdleStrategy;
@@ -51,14 +50,19 @@ public class EmbeddedDualExclusiveThroughput
 
     private static volatile boolean printingActive = true;
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws InterruptedException if the thread sleep delay is interrupted.
+     */
     @SuppressWarnings("MethodLength")
-    public static void main(final String[] args) throws Exception
+    public static void main(final String[] args) throws InterruptedException
     {
         loadPropertiesFiles(args);
 
         final RateReporter reporter = new RateReporter(
             TimeUnit.SECONDS.toNanos(1), EmbeddedDualExclusiveThroughput::printRate);
-        final FragmentHandler rateReporterHandler = rateReporterHandler(reporter);
         final ExecutorService executor = Executors.newFixedThreadPool(2);
         final AtomicBoolean running = new AtomicBoolean(true);
         final AvailableImageHandler handler =
@@ -71,8 +75,8 @@ public class EmbeddedDualExclusiveThroughput
         final String sourceUriOne = builder.controlEndpoint("localhost:20550").tags("1").build();
         final String sourceUriTwo = builder.controlEndpoint("localhost:20551").tags("2").build();
 
-        try (MediaDriver ignore = MediaDriver.launch();
-            Aeron aeron = Aeron.connect();
+        try (MediaDriver mediaDriver = MediaDriver.launch();
+            Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
             Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID, handler, null);
             ExclusivePublication publicationOne = aeron.addExclusivePublication(sourceUriOne, STREAM_ID);
             ExclusivePublication publicationTwo = aeron.addExclusivePublication(sourceUriTwo, STREAM_ID))
@@ -87,7 +91,7 @@ public class EmbeddedDualExclusiveThroughput
 
             executor.execute(reporter);
             executor.execute(() -> SamplesUtil.subscriberLoop(
-                rateReporterHandler, FRAGMENT_COUNT_LIMIT, running).accept(subscription));
+                rateReporterHandler(reporter), FRAGMENT_COUNT_LIMIT, running).accept(subscription));
 
             final ContinueBarrier barrier = new ContinueBarrier("Execute again?");
             final IdleStrategy idleStrategy = SampleConfiguration.newIdleStrategy();
@@ -111,7 +115,7 @@ public class EmbeddedDualExclusiveThroughput
 
                     if (a < NUMBER_OF_MESSAGES)
                     {
-                        if (publicationOne.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH) > 0)
+                        if (publicationOne.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH, null) > 0)
                         {
                             a++;
                         }
@@ -124,7 +128,7 @@ public class EmbeddedDualExclusiveThroughput
 
                     if (b < NUMBER_OF_MESSAGES)
                     {
-                        if (publicationTwo.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH) > 0)
+                        if (publicationTwo.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH, null) > 0)
                         {
                             b++;
                         }
@@ -161,7 +165,7 @@ public class EmbeddedDualExclusiveThroughput
         }
     }
 
-    public static void printRate(
+    private static void printRate(
         final double messagesPerSec, final double bytesPerSec, final long totalFragments, final long totalBytes)
     {
         if (printingActive)

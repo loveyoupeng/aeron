@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,7 +37,6 @@ import static io.aeron.logbuffer.FrameDescriptor.*;
  *
  * @see Subscription#controlledPoll(ControlledFragmentHandler, int)
  * @see Image#controlledPoll(ControlledFragmentHandler, int)
- * @see Image#controlledPeek(long, ControlledFragmentHandler, long)
  */
 public class ControlledFragmentAssembler implements ControlledFragmentHandler
 {
@@ -108,38 +107,41 @@ public class ControlledFragmentAssembler implements ControlledFragmentHandler
      * @param buffer containing the data.
      * @param offset at which the data begins.
      * @param length of the data in bytes.
-     * @param header representing the meta data for the data.
+     * @param header representing the metadata for the data.
      * @return {@link io.aeron.logbuffer.ControlledFragmentHandler.Action} to be taken after processing fragment.
      */
     public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         final byte flags = header.flags();
-
         Action action = Action.CONTINUE;
 
         if ((flags & UNFRAGMENTED) == UNFRAGMENTED)
         {
             action = delegate.onFragment(buffer, offset, length, header);
         }
+        else if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
+        {
+            final BufferBuilder builder = getBufferBuilder(header.sessionId());
+            builder.reset()
+                .captureHeader(header)
+                .append(buffer, offset, length)
+                .nextTermOffset(header.nextTermOffset());
+        }
         else
         {
-            if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
+            final BufferBuilder builder = builderBySessionIdMap.get(header.sessionId());
+            if (null != builder)
             {
-                final BufferBuilder builder = getBufferBuilder(header.sessionId());
-                builder.reset().append(buffer, offset, length);
-            }
-            else
-            {
-                final BufferBuilder builder = builderBySessionIdMap.get(header.sessionId());
-                if (null != builder && builder.limit() != 0)
+                if (header.termOffset() == builder.nextTermOffset())
                 {
                     final int limit = builder.limit();
+
                     builder.append(buffer, offset, length);
 
                     if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
                     {
-                        final int msgLength = builder.limit();
-                        action = delegate.onFragment(builder.buffer(), 0, msgLength, header);
+                        action = delegate.onFragment(
+                            builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
 
                         if (Action.ABORT == action)
                         {
@@ -150,6 +152,14 @@ public class ControlledFragmentAssembler implements ControlledFragmentHandler
                             builder.reset();
                         }
                     }
+                    else
+                    {
+                        builder.nextTermOffset(header.nextTermOffset());
+                    }
+                }
+                else
+                {
+                    builder.reset();
                 }
             }
         }

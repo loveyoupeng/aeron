@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,10 @@
  * limitations under the License.
  */
 
-#include <cstdint>
 #include <cstdio>
-#include <signal.h>
+#include <csignal>
 #include <thread>
-#include <array>
-
-#define __STDC_FORMAT_MACROS
-#include <inttypes.h>
+#include <cinttypes>
 
 #include "util/CommandOptionParser.h"
 #include "concurrent/BusySpinIdleStrategy.h"
@@ -33,9 +29,9 @@
 using namespace aeron::util;
 using namespace aeron;
 
-std::atomic<bool> running (true);
+std::atomic<bool> running(true);
 
-void sigIntHandler(int param)
+void sigIntHandler(int)
 {
     running = false;
 }
@@ -52,17 +48,17 @@ static const char optFrags    = 'f';
 
 struct Settings
 {
-    std::string dirPrefix = "";
+    std::string dirPrefix;
     std::string channel = samples::configuration::DEFAULT_CHANNEL;
     std::int32_t streamId = samples::configuration::DEFAULT_STREAM_ID;
-    long numberOfMessages = samples::configuration::DEFAULT_NUMBER_OF_MESSAGES;
+    long long numberOfMessages = samples::configuration::DEFAULT_NUMBER_OF_MESSAGES;
     int messageLength = samples::configuration::DEFAULT_MESSAGE_LENGTH;
     int lingerTimeoutMs = samples::configuration::DEFAULT_LINGER_TIMEOUT_MS;
     int fragmentCountLimit = samples::configuration::DEFAULT_FRAGMENT_COUNT_LIMIT;
     bool progress = samples::configuration::DEFAULT_PUBLICATION_RATE_PROGRESS;
 };
 
-Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
+Settings parseCmdLine(CommandOptionParser &cp, int argc, char **argv)
 {
     cp.parse(argc, argv);
     if (cp.getOption(optHelp).isPresent())
@@ -76,7 +72,7 @@ Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
     s.dirPrefix = cp.getOption(optPrefix).getParam(0, s.dirPrefix);
     s.channel = cp.getOption(optChannel).getParam(0, s.channel);
     s.streamId = cp.getOption(optStreamId).getParamAsInt(0, 1, INT32_MAX, s.streamId);
-    s.numberOfMessages = cp.getOption(optMessages).getParamAsLong(0, 0, LONG_MAX, s.numberOfMessages);
+    s.numberOfMessages = cp.getOption(optMessages).getParamAsLong(0, 0, INT64_MAX, s.numberOfMessages);
     s.messageLength = cp.getOption(optLength).getParamAsInt(0, sizeof(std::int64_t), INT32_MAX, s.messageLength);
     s.lingerTimeoutMs = cp.getOption(optLinger).getParamAsInt(0, 0, 60 * 60 * 1000, s.lingerTimeoutMs);
     s.fragmentCountLimit = cp.getOption(optFrags).getParamAsInt(0, 1, INT32_MAX, s.fragmentCountLimit);
@@ -87,22 +83,23 @@ Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
 
 std::atomic<bool> printingActive;
 
-void printRate(double messagesPerSec, double bytesPerSec, long totalFragments, long totalBytes)
+void printRate(double messagesPerSec, double bytesPerSec, std::int64_t totalFragments, std::int64_t totalBytes)
 {
     if (printingActive)
     {
         std::printf(
-            "%.04g msgs/sec, %.04g bytes/sec, totals %ld messages %ld MB payloads\n",
+            "%.04g msgs/sec, %.04g bytes/sec, totals %" PRId64 " messages %" PRId64 " MB payloads\n",
             messagesPerSec, bytesPerSec, totalFragments, totalBytes / (1024 * 1024));
     }
 }
 
-fragment_handler_t rateReporterHandler(RateReporter& rateReporter)
+fragment_handler_t rateReporterHandler(RateReporter &rateReporter)
 {
-    return [&rateReporter](AtomicBuffer&, util::index_t, util::index_t length, Header&)
-    {
-        rateReporter.onMessage(1, length);
-    };
+    return
+        [&rateReporter](AtomicBuffer &, util::index_t, util::index_t length, Header &)
+        {
+            rateReporter.onMessage(1, length);
+        };
 }
 
 inline bool isRunning()
@@ -123,7 +120,8 @@ int main(int argc, char **argv)
     cp.addOption(CommandOption(optLinger,   1, 1, "milliseconds    Linger timeout in milliseconds."));
     cp.addOption(CommandOption(optFrags,    1, 1, "limit           Fragment Count Limit."));
 
-    signal (SIGINT, sigIntHandler);
+    std::shared_ptr<std::thread> rateReporterThread;
+    std::shared_ptr<std::thread> pollThread;
 
     try
     {
@@ -132,9 +130,9 @@ int main(int argc, char **argv)
         std::cout << "Subscribing to channel " << settings.channel << " on Stream ID " << settings.streamId << std::endl;
 
         std::cout << "Streaming " << toStringWithCommas(settings.numberOfMessages) << " messages of payload length "
-            << settings.messageLength << " bytes to "
-            << settings.channel << " on stream ID "
-            << settings.streamId << std::endl;
+                  << settings.messageLength << " bytes to "
+                  << settings.channel << " on stream ID "
+                  << settings.streamId << std::endl;
 
         aeron::Context context;
 
@@ -144,31 +142,33 @@ int main(int argc, char **argv)
         }
 
         context.newPublicationHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int32_t sessionId, std::int64_t correlationId)
             {
                 std::cout << "Publication: " << channel << " " << correlationId << ":" << streamId << ":" << sessionId << std::endl;
             });
 
         context.newSubscriptionHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int64_t correlationId)
             {
                 std::cout << "Subscription: " << channel << " " << correlationId << ":" << streamId << std::endl;
             });
 
-        context.availableImageHandler([](Image &image)
-        {
-            std::cout << "Available image correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
-            std::cout << " at position=" << image.position() << " from " << image.sourceIdentity() << std::endl;
-        });
+        context.availableImageHandler(
+            [](Image &image)
+            {
+                std::cout << "Available image correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
+                std::cout << " at position=" << image.position() << " from " << image.sourceIdentity() << std::endl;
+            });
 
-        context.unavailableImageHandler([](Image &image)
-        {
-            std::cout << "Unavailable image on correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
-            std::cout << " at position=" << image.position() << std::endl;
-        });
+        context.unavailableImageHandler(
+            [](Image &image)
+            {
+                std::cout << "Unavailable image on correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
+                std::cout << " at position=" << image.position() << std::endl;
+            });
 
         Aeron aeron(context);
-
+        signal(SIGINT, sigIntHandler);
         std::int64_t subscriptionId = aeron.addSubscription(settings.channel, settings.streamId);
         std::int64_t publicationId = aeron.addExclusivePublication(settings.channel, settings.streamId);
 
@@ -186,14 +186,39 @@ int main(int argc, char **argv)
             publication = aeron.findExclusivePublication(publicationId);
         }
 
+        if (settings.messageLength > publication->maxPayloadLength())
+        {
+            std::cerr << "ERROR - tryClaim limit: messageLength=" << settings.messageLength
+                      << " > maxPayloadLength=" << publication->maxPayloadLength()
+                      << ", use publication offer or increase MTU." << std::endl;
+            return -1;
+        }
+
         RateReporter rateReporter(std::chrono::seconds(1), printRate);
         FragmentAssembler fragmentAssembler(rateReporterHandler(rateReporter));
         auto handler = fragmentAssembler.handler();
 
-        std::shared_ptr<std::thread> rateReporterThread;
-
         ExclusivePublication *publicationPtr = publication.get();
         Subscription *subscriptionPtr = subscription.get();
+
+        aeron::util::OnScopeExit tidy(
+            [&]()
+            {
+                running = false;
+                rateReporter.halt();
+
+                if (nullptr != pollThread && pollThread->joinable())
+                {
+                    pollThread->join();
+                    pollThread = nullptr;
+                }
+
+                if (nullptr != rateReporterThread && rateReporterThread->joinable())
+                {
+                    rateReporterThread->join();
+                    rateReporterThread = nullptr;
+                }
+            });
 
         if (settings.progress)
         {
@@ -203,28 +228,33 @@ int main(int argc, char **argv)
         std::uint64_t failedPolls = 0;
         std::uint64_t successfulPolls = 0;
 
-        std::thread pollThread([&]()
-        {
-            while (!subscriptionPtr->isConnected())
+        pollThread = std::make_shared<std::thread>(
+            [&]()
             {
-                std::this_thread::yield();
-            }
-
-            std::shared_ptr<Image> imageSharedPtr = subscriptionPtr->imageByIndex(0);
-            Image& image = *imageSharedPtr;
-
-            while (isRunning())
-            {
-                if (0 == image.poll(handler, settings.fragmentCountLimit))
+                while (!subscriptionPtr->isConnected())
                 {
-                    ++failedPolls;
+                    std::this_thread::yield();
                 }
-                else
+
+                std::shared_ptr<Image> imageSharedPtr = subscriptionPtr->imageByIndex(0);
+                Image &image = *imageSharedPtr;
+                BusySpinIdleStrategy idleStrategy;
+
+                while (isRunning())
                 {
-                    ++successfulPolls;
+                    int fragments = image.poll(handler, settings.fragmentCountLimit);
+                    if (0 == fragments)
+                    {
+                        ++failedPolls;
+                    }
+                    else
+                    {
+                        ++successfulPolls;
+                    }
+
+                    idleStrategy.idle(fragments);
                 }
-            }
-        });
+            });
 
         do
         {
@@ -238,7 +268,7 @@ int main(int argc, char **argv)
                 rateReporter.reset();
             }
 
-            for (long i = 0; i < settings.numberOfMessages && isRunning(); i++)
+            for (std::int64_t i = 0; i < settings.numberOfMessages && isRunning(); i++)
             {
                 while (publicationPtr->tryClaim(settings.messageLength, bufferClaim) < 0L)
                 {
@@ -260,10 +290,10 @@ int main(int argc, char **argv)
 
             std::cout << "Done streaming." << std::endl;
             std::cout << "Publication back pressure ratio ";
-            std::cout << ((double)backPressureCount / settings.numberOfMessages) << std::endl;
+            std::cout << ((double)backPressureCount / (double)settings.numberOfMessages) << std::endl;
 
             std::cout << "Subscription failure ratio ";
-            std::cout << ((double)failedPolls / (failedPolls + successfulPolls)) << std::endl;
+            std::cout << ((double)failedPolls / (double)(failedPolls + successfulPolls)) << std::endl;
 
             if (isRunning() && settings.lingerTimeoutMs > 0)
             {
@@ -274,29 +304,19 @@ int main(int argc, char **argv)
             printingActive = false;
         }
         while (isRunning() && continuationBarrier("Execute again?"));
-
-        running = false;
-        rateReporter.halt();
-
-        pollThread.join();
-
-        if (nullptr != rateReporterThread)
-        {
-            rateReporterThread->join();
-        }
     }
-    catch (const CommandOptionException& e)
+    catch (const CommandOptionException &e)
     {
         std::cerr << "ERROR: " << e.what() << std::endl << std::endl;
         cp.displayOptionsHelp(std::cerr);
         return -1;
     }
-    catch (const SourcedException& e)
+    catch (const SourcedException &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << e.where() << std::endl;
         return -1;
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << std::endl;
         return -1;

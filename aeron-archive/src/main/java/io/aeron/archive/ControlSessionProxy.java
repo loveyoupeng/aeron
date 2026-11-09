@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,10 +19,8 @@ import io.aeron.security.SessionProxy;
 
 import static io.aeron.archive.codecs.ControlResponseCode.OK;
 
-public class ControlSessionProxy implements SessionProxy
+class ControlSessionProxy implements SessionProxy
 {
-    private static final String SESSION_REJECTED_MSG = "authentication rejected";
-
     private final ControlResponseProxy controlResponseProxy;
     private ControlSession controlSession;
 
@@ -37,11 +35,19 @@ public class ControlSessionProxy implements SessionProxy
         return this;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public long sessionId()
     {
         return controlSession.sessionId();
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean challenge(final byte[] encodedChallenge)
     {
         if (controlResponseProxy.sendChallenge(
@@ -57,6 +63,10 @@ public class ControlSessionProxy implements SessionProxy
         return false;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean authenticate(final byte[] encodedPrincipal)
     {
         if (controlResponseProxy.sendResponse(
@@ -74,8 +84,12 @@ public class ControlSessionProxy implements SessionProxy
         return false;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void reject()
     {
-        controlSession.reject(SESSION_REJECTED_MSG);
+        controlSession.reject();
     }
 }

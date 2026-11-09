@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,40 +20,59 @@ import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import io.aeron.logbuffer.LogBufferDescriptor;
-import io.aeron.test.TestMediaDriver;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
-import org.junit.After;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class ControlledMessageTest
+@ExtendWith(InterruptingTestCallback.class)
+class ControlledMessageTest
 {
     private static final String CHANNEL = CommonContext.IPC_CHANNEL;
-    private static final int STREAM_ID = 1;
+    private static final int STREAM_ID = 1001;
     private static final int FRAGMENT_COUNT_LIMIT = 10;
     private static final int PAYLOAD_LENGTH = 10;
 
-    private final TestMediaDriver driver = TestMediaDriver.launch(new MediaDriver.Context()
-        .errorHandler(Throwable::printStackTrace)
-        .dirDeleteOnShutdown(true)
-        .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
-        .threadingMode(ThreadingMode.SHARED));
+    @RegisterExtension
+    final SystemTestWatcher testWatcher = new SystemTestWatcher();
 
-    private final Aeron aeron = Aeron.connect();
+    private TestMediaDriver driver;
 
-    @After
-    public void after()
+    private Aeron aeron;
+
+    @BeforeEach
+    void setUp()
     {
-        CloseHelper.close(aeron);
-        CloseHelper.close(driver);
+        driver = TestMediaDriver.launch(new MediaDriver.Context()
+                .errorHandler(Tests::onError)
+                .publicationTermBufferLength(LogBufferDescriptor.TERM_MIN_LENGTH)
+                .threadingMode(ThreadingMode.SHARED),
+            testWatcher);
+        testWatcher.dataCollector().add(driver.context().aeronDirectory());
+
+        aeron = Aeron.connect();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldReceivePublishedMessage()
+    @AfterEach
+    void after()
+    {
+        CloseHelper.closeAll(aeron, driver);
+    }
+
+    @Test
+    @InterruptAfter(10)
+    void shouldReceivePublishedMessage()
     {
         try (Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID);
             Publication publication = aeron.addPublication(CHANNEL, STREAM_ID))
@@ -69,8 +88,7 @@ public class ControlledMessageTest
             {
                 while (publication.offer(srcBuffer, i * PAYLOAD_LENGTH, PAYLOAD_LENGTH) < 0L)
                 {
-                    Thread.yield();
-                    SystemTest.checkInterruptedStatus();
+                    Tests.yield();
                 }
             }
 
@@ -81,8 +99,7 @@ public class ControlledMessageTest
                 final int fragments = subscription.controlledPoll(fragmentCollector, FRAGMENT_COUNT_LIMIT);
                 if (0 == fragments)
                 {
-                    Thread.yield();
-                    SystemTest.checkInterruptedStatus();
+                    Tests.yield();
                 }
                 numFragments += fragments;
             }
@@ -92,7 +109,7 @@ public class ControlledMessageTest
 
             for (int i = 0; i < srcBuffer.capacity(); i++)
             {
-                assertThat("same at i=" + i, collectedBuffer.getByte(i), is(srcBuffer.getByte(i)));
+                assertEquals(srcBuffer.getByte(i), collectedBuffer.getByte(i), "same at i=" + i);
             }
         }
     }
@@ -103,7 +120,7 @@ public class ControlledMessageTest
         private int limit = 0;
         private int fragmentCount = 0;
 
-        public UnsafeBuffer collectedBuffer()
+        UnsafeBuffer collectedBuffer()
         {
             return collectedBuffer;
         }

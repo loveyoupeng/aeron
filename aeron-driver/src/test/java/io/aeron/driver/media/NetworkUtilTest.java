@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,25 +15,26 @@
  */
 package io.aeron.driver.media;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.net.*;
 import java.util.*;
 
+import static io.aeron.driver.media.NetworkUtil.*;
 import static java.lang.Short.parseShort;
 import static java.net.InetAddress.getByName;
-import static org.hamcrest.Matchers.is;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.sameInstance;
-import static org.junit.Assert.*;
-import static io.aeron.driver.media.NetworkUtil.filterBySubnet;
-import static io.aeron.driver.media.NetworkUtil.isMatchWithPrefix;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-public class NetworkUtilTest
+class NetworkUtilTest
 {
     @Test
-    public void shouldNotMatchIfLengthsAreDifferent()
+    void shouldNotMatchIfLengthsAreDifferent()
     {
         assertFalse(isMatchWithPrefix(new byte[0], new byte[3], 0));
         assertFalse(isMatchWithPrefix(new byte[1], new byte[2], 0));
@@ -41,7 +42,7 @@ public class NetworkUtilTest
     }
 
     @Test
-    public void shouldMatchIfAllBytesMatch()
+    void shouldMatchIfAllBytesMatch()
     {
         final byte[] a = { 'a', 'b', 'c', 'd' };
         final byte[] b = { 'a', 'b', 'c', 'd' };
@@ -49,7 +50,7 @@ public class NetworkUtilTest
     }
 
     @Test
-    public void shouldMatchIfAllBytesWithPrefixMatch()
+    void shouldMatchIfAllBytesWithPrefixMatch()
     {
         final byte[] a = { 'a', 'b', 'c', 'd' };
         final byte[] b = { 'a', 'b', 'c', 'e' };
@@ -57,7 +58,7 @@ public class NetworkUtilTest
     }
 
     @Test
-    public void shouldNotMatchIfNotAllBytesWithPrefixMatch()
+    void shouldNotMatchIfNotAllBytesWithPrefixMatch()
     {
         final byte[] a = { 'a', 'b', 'c', 'd' };
         final byte[] b = { 'a', 'b', 'd', 'd' };
@@ -65,7 +66,7 @@ public class NetworkUtilTest
     }
 
     @Test
-    public void shouldMatchIfAllBytesWithPrefixUnalignedMatch()
+    void shouldMatchIfAllBytesWithPrefixUnalignedMatch()
     {
         assertTrue(isMatchWithPrefix(
             asBytes(0b10101010_11111111_00000000_00000000),
@@ -74,7 +75,7 @@ public class NetworkUtilTest
     }
 
     @Test
-    public void shouldNotMatchIfNotAllBytesWithUnalignedPrefixMatch()
+    void shouldNotMatchIfNotAllBytesWithUnalignedPrefixMatch()
     {
         assertFalse(isMatchWithPrefix(
             asBytes(0b10101010_11111111_00000000_00000000),
@@ -83,7 +84,7 @@ public class NetworkUtilTest
     }
 
     @Test
-    public void shouldFilterBySubnetAndFindOneResult() throws Exception
+    void shouldFilterBySubnetAndFindOneResult() throws Exception
     {
         final NetworkInterfaceStub stub = new NetworkInterfaceStub();
 
@@ -92,12 +93,12 @@ public class NetworkUtilTest
 
         final NetworkInterface[] filteredBySubnet = filterBySubnet(stub, getByName("192.168.0.0"), 24);
 
-        assertThat(filteredBySubnet.length, is(1));
-        assertThat(filteredBySubnet[0], is(ifc1));
+        assertEquals(1, filteredBySubnet.length);
+        assertEquals(ifc1, filteredBySubnet[0]);
     }
 
     @Test
-    public void shouldFilterBySubnetAndFindNoResults() throws Exception
+    void shouldFilterBySubnetAndFindNoResults() throws Exception
     {
         final NetworkInterfaceStub stub = new NetworkInterfaceStub();
 
@@ -106,11 +107,11 @@ public class NetworkUtilTest
 
         final NetworkInterface[] filteredBySubnet = filterBySubnet(stub, getByName("192.169.0.0"), 24);
 
-        assertThat(filteredBySubnet.length, is(0));
+        assertEquals(0, filteredBySubnet.length);
     }
 
     @Test
-    public void shouldFilterBySubnetAndFindMultipleResultsOrderedByMatchLength() throws Exception
+    void shouldFilterBySubnetAndFindMultipleResultsOrderedByMatchLength() throws Exception
     {
         final NetworkInterfaceStub stub = new NetworkInterfaceStub();
 
@@ -121,14 +122,14 @@ public class NetworkUtilTest
 
         final NetworkInterface[] filteredBySubnet = filterBySubnet(stub, getByName("192.0.0.0"), 8);
 
-        assertThat(filteredBySubnet.length, is(3));
+        assertEquals(3, filteredBySubnet.length);
         assertThat(filteredBySubnet[0], sameInstance(ifc2));
         assertThat(filteredBySubnet[1], sameInstance(ifc3));
         assertThat(filteredBySubnet[2], sameInstance(ifc1));
     }
 
     @Test
-    public void shouldFilterBySubnetAndFindOneIpV6Result() throws Exception
+    void shouldFilterBySubnetAndFindOneIpV6Result() throws Exception
     {
         final NetworkInterfaceStub stub = new NetworkInterfaceStub();
 
@@ -137,12 +138,12 @@ public class NetworkUtilTest
 
         final NetworkInterface[] filteredBySubnet = filterBySubnet(stub, getByName("fe80:0:0:0001:0002:0:0:0"), 80);
 
-        assertThat(filteredBySubnet.length, is(1));
-        assertThat(filteredBySubnet[0], is(ifc1));
+        assertEquals(1, filteredBySubnet.length);
+        assertEquals(ifc1, filteredBySubnet[0]);
     }
 
     @Test
-    public void shouldFilterBySubnetAndFindNoIpV6Results() throws Exception
+    void shouldFilterBySubnetAndFindNoIpV6Results() throws Exception
     {
         final NetworkInterfaceStub stub = new NetworkInterfaceStub();
 
@@ -151,11 +152,11 @@ public class NetworkUtilTest
 
         final NetworkInterface[] filteredBySubnet = filterBySubnet(stub, getByName("fe80:0:0:0004:0:0:0:0"), 64);
 
-        assertThat(filteredBySubnet.length, is(0));
+        assertEquals(0, filteredBySubnet.length);
     }
 
     @Test
-    public void shouldFilterBySubnetAndFindMultipleIpV6ResultsOrderedByMatchLength() throws Exception
+    void shouldFilterBySubnetAndFindMultipleIpV6ResultsOrderedByMatchLength() throws Exception
     {
         final NetworkInterfaceStub stub = new NetworkInterfaceStub();
 
@@ -166,10 +167,51 @@ public class NetworkUtilTest
 
         final NetworkInterface[] filteredBySubnet = filterBySubnet(stub, getByName("fe80:0:0:0:0:0:0:0"), 16);
 
-        assertThat(filteredBySubnet.length, is(3));
+        assertEquals(3, filteredBySubnet.length);
         assertThat(filteredBySubnet[0], sameInstance(ifc3));
         assertThat(filteredBySubnet[1], sameInstance(ifc2));
         assertThat(filteredBySubnet[2], sameInstance(ifc1));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "0,0",
+        "1,0x80000000",
+        "2,0xC0000000",
+        "3,0xE0000000",
+        "4,0xF0000000",
+        "5,0xF8000000",
+        "6,0xFC000000",
+        "7,0xFE000000",
+        "8,0xFF000000",
+        "9,0xFF800000",
+        "10,0xFFC00000",
+        "11,0xFFE00000",
+        "12,0xFFF00000",
+        "13,0xFFF80000",
+        "14,0xFFFC0000",
+        "15,0xFFFE0000",
+        "16,0xFFFF0000",
+        "17,0xFFFF8000",
+        "18,0xFFFFC000",
+        "19,0xFFFFE000",
+        "20,0xFFFFF000",
+        "21,0xFFFFF800",
+        "22,0xFFFFFC00",
+        "23,0xFFFFFE00",
+        "24,0xFFFFFF00",
+        "25,0xFFFFFF80",
+        "26,0xFFFFFFC0",
+        "27,0xFFFFFFE0",
+        "28,0xFFFFFFF0",
+        "29,0xFFFFFFF8",
+        "30,0xFFFFFFFC",
+        "31,0xFFFFFFFE",
+        "32,0xFFFFFFFF",
+    })
+    void shouldConvertSubnetPrefixIpV4PrefixToMask(final int subnetPrefix, final long expectedMask)
+    {
+        assertEquals(expectedMask + Integer.MIN_VALUE, prefixLengthToIpV4Mask(subnetPrefix) + Integer.MIN_VALUE);
     }
 
     static class NetworkInterfaceStub implements NetworkInterfaceShim

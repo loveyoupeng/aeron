@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.cluster.client.ClusterClock;
+import io.aeron.cluster.service.ClusterClock;
+
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 /**
  * A {@link ClusterClock} implemented by calling {@link System#currentTimeMillis()}.
@@ -23,10 +25,54 @@ import io.aeron.cluster.client.ClusterClock;
 public class MillisecondClusterClock implements ClusterClock
 {
     /**
+     * Default constructor.
+     */
+    public MillisecondClusterClock()
+    {
+    }
+
+    /**
      * {@inheritDoc}
      */
+    @Override
     public long time()
     {
         return System.currentTimeMillis();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long timeMillis()
+    {
+        return System.currentTimeMillis();
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long timeMicros()
+    {
+        return MILLISECONDS.toMicros(System.currentTimeMillis());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long timeNanos()
+    {
+        return MILLISECONDS.toNanos(System.currentTimeMillis());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public long convertToNanos(final long time)
+    {
+        return MILLISECONDS.toNanos(time);
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,27 +15,28 @@
  */
 
 #include <cstdint>
-#include <cstdio>
 #include <thread>
-#include <signal.h>
+#include <csignal>
 
 #include "Configuration.h"
 #include "util/CommandOptionParser.h"
 #include "Aeron.h"
+#include "FragmentAssembler.h"
+#include "concurrent/SleepingIdleStrategy.h"
 
 using namespace aeron::util;
 using namespace aeron;
 
-std::atomic<bool> running (true);
+std::atomic<bool> running(true);
 
-void sigIntHandler(int param)
+void sigIntHandler(int)
 {
     running = false;
 }
 
-static const char optHelp     = 'h';
-static const char optPrefix   = 'p';
-static const char optChannel  = 'c';
+static const char optHelp = 'h';
+static const char optPrefix = 'p';
+static const char optChannel = 'c';
 static const char optStreamId = 's';
 
 static const std::chrono::duration<long, std::milli> IDLE_SLEEP_MS(1);
@@ -43,12 +44,12 @@ static const int FRAGMENTS_LIMIT = 10;
 
 struct Settings
 {
-    std::string dirPrefix = "";
+    std::string dirPrefix;
     std::string channel = samples::configuration::DEFAULT_CHANNEL;
     std::int32_t streamId = samples::configuration::DEFAULT_STREAM_ID;
 };
 
-Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
+Settings parseCmdLine(CommandOptionParser &cp, int argc, char **argv)
 {
     cp.parse(argc, argv);
     if (cp.getOption(optHelp).isPresent())
@@ -68,23 +69,23 @@ Settings parseCmdLine(CommandOptionParser& cp, int argc, char** argv)
 
 fragment_handler_t printStringMessage()
 {
-    return [&](const AtomicBuffer& buffer, util::index_t offset, util::index_t length, const Header& header)
+    return [&](const AtomicBuffer &buffer, util::index_t offset, util::index_t length, const Header &header)
     {
-        std::cout << "Message to stream " << header.streamId() << " from session " << header.sessionId();
-        std::cout << "(" << length << "@" << offset << ") <<";
-        std::cout << std::string(reinterpret_cast<const char *>(buffer.buffer()) + offset, static_cast<std::size_t>(length)) << ">>" << std::endl;
+        std::cout
+            << "Message to stream " << header.streamId() << " from session " << header.sessionId()
+            << "(" << length << "@" << offset << ") <<"
+            << std::string(reinterpret_cast<const char *>(buffer.buffer()) + offset, static_cast<std::size_t>(length))
+            << ">>" << std::endl;
     };
 }
 
-int main(int argc, char** argv)
+int main(int argc, char **argv)
 {
     CommandOptionParser cp;
     cp.addOption(CommandOption(optHelp,     0, 0, "            Displays help information."));
     cp.addOption(CommandOption(optPrefix,   1, 1, "dir         Prefix directory for aeron driver."));
     cp.addOption(CommandOption(optChannel,  1, 1, "channel     Channel."));
     cp.addOption(CommandOption(optStreamId, 1, 1, "streamId    Stream ID."));
-
-    signal (SIGINT, sigIntHandler);
 
     try
     {
@@ -100,25 +101,27 @@ int main(int argc, char** argv)
         }
 
         context.newSubscriptionHandler(
-            [](const std::string& channel, std::int32_t streamId, std::int64_t correlationId)
+            [](const std::string &channel, std::int32_t streamId, std::int64_t correlationId)
             {
                 std::cout << "Subscription: " << channel << " " << correlationId << ":" << streamId << std::endl;
             });
 
-        context.availableImageHandler([](Image &image)
+        context.availableImageHandler(
+            [](Image &image)
             {
                 std::cout << "Available image correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
                 std::cout << " at position=" << image.position() << " from " << image.sourceIdentity() << std::endl;
             });
 
-        context.unavailableImageHandler([](Image &image)
+        context.unavailableImageHandler(
+            [](Image &image)
             {
                 std::cout << "Unavailable image on correlationId=" << image.correlationId() << " sessionId=" << image.sessionId();
                 std::cout << " at position=" << image.position() << " from " << image.sourceIdentity() << std::endl;
             });
 
         std::shared_ptr<Aeron> aeron = Aeron::connect(context);
-
+        signal(SIGINT, sigIntHandler);
         // add the subscription to start the process
         std::int64_t id = aeron->addSubscription(settings.channel, settings.streamId);
 
@@ -132,11 +135,13 @@ int main(int argc, char** argv)
 
         const std::int64_t channelStatus = subscription->channelStatus();
 
-        std::cout << "Subscription channel status (id=" << subscription->channelStatusId() << ") "
+        std::cout
+            << "Subscription channel status (id=" << subscription->channelStatusId() << ") "
             << (channelStatus == ChannelEndpointStatus::CHANNEL_ENDPOINT_ACTIVE ? "ACTIVE" : std::to_string(channelStatus))
             << std::endl;
 
-        fragment_handler_t handler = printStringMessage();
+        FragmentAssembler fragmentAssembler(printStringMessage());
+        fragment_handler_t handler = fragmentAssembler.handler();
         SleepingIdleStrategy idleStrategy(IDLE_SLEEP_MS);
 
         while (running)
@@ -144,20 +149,19 @@ int main(int argc, char** argv)
             const int fragmentsRead = subscription->poll(handler, FRAGMENTS_LIMIT);
             idleStrategy.idle(fragmentsRead);
         }
-
     }
-    catch (const CommandOptionException& e)
+    catch (const CommandOptionException &e)
     {
         std::cerr << "ERROR: " << e.what() << std::endl << std::endl;
         cp.displayOptionsHelp(std::cerr);
         return -1;
     }
-    catch (const SourcedException& e)
+    catch (const SourcedException &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << e.where() << std::endl;
         return -1;
     }
-    catch (const std::exception& e)
+    catch (const std::exception &e)
     {
         std::cerr << "FAILED: " << e.what() << " : " << std::endl;
         return -1;

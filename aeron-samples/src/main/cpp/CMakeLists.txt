@@ -1,5 +1,5 @@
 #
-# Copyright 2014-2019 Real Logic Ltd.
+# Copyright 2014-2025 Real Logic Limited.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,12 @@
 # limitations under the License.
 #
 
-include_directories(${AERON_CLIENT_SOURCE_PATH})
+set(CLIENT_WRAPPER_LINK_LIB "aeron_client_wrapper")
+set(C_CLIENT_LINK_LIB "aeron_static")
+if (LINK_SAMPLES_CLIENT_SHARED OR MSVC)
+    set(C_CLIENT_LINK_LIB "aeron")
+    add_definitions(-DCLIENT_SHARED)
+endif ()
 
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DDISABLE_BOUNDS_CHECKS")
 
@@ -22,71 +27,77 @@ set(HEADERS
     Configuration.h
     RateReporter.h)
 
-add_executable(AeronStat AeronStat.cpp ${HEADERS})
 add_executable(BasicPublisher BasicPublisher.cpp ${HEADERS})
-add_executable(TimeTests raw/TimeTests.cpp ${HEADERS})
 add_executable(BasicSubscriber BasicSubscriber.cpp ${HEADERS})
 add_executable(StreamingPublisher StreamingPublisher.cpp ${HEADERS})
 add_executable(RateSubscriber RateSubscriber.cpp ${HEADERS})
 add_executable(Pong Pong.cpp ${HEADERS})
 add_executable(Ping Ping.cpp ${HEADERS})
 add_executable(Throughput Throughput.cpp ${HEADERS})
-add_executable(ErrorStat ErrorStat.cpp ${HEADERS})
-add_executable(LossStat LossStat.cpp ${HEADERS})
-add_executable(DriverTool DriverTool.cpp ${HEADERS})
-add_executable(ExclusiveThroughput ExclusiveThroughput.cpp ${HEADERS})
 add_executable(PingPong PingPong.cpp ${HEADERS})
+add_executable(ExclusivePingPong ExclusivePingPong.cpp ${HEADERS})
 
-target_link_libraries(AeronStat
-    aeron_client)
-
+target_include_directories(BasicPublisher
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(BasicPublisher
-    aeron_client)
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB})
 
-target_link_libraries(TimeTests
-    ${CMAKE_THREAD_LIBS_INIT})
-
+target_include_directories(BasicSubscriber
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(BasicSubscriber
-    aeron_client)
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB})
 
+target_include_directories(StreamingPublisher
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(StreamingPublisher
-    aeron_client)
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB})
 
+target_include_directories(RateSubscriber
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(RateSubscriber
-    aeron_client)
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB})
 
+target_include_directories(Pong
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(Pong
-    aeron_client)
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB})
 
+target_include_directories(Ping
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(Ping
-    aeron_client
-    ${HDRHISTOGRAM_LIBS})
-
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB}
+    hdr_histogram_static)
 add_dependencies(Ping hdr_histogram)
 
-target_link_libraries(Throughput
-    aeron_client)
-
-target_link_libraries(ErrorStat
-    aeron_client)
-
-target_link_libraries(LossStat
-    aeron_client)
-
-target_link_libraries(DriverTool
-    aeron_client)
-
-target_link_libraries(ExclusiveThroughput
-    aeron_client)
-
+target_include_directories(PingPong
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
 target_link_libraries(PingPong
-    aeron_client
-    ${HDRHISTOGRAM_LIBS})
-
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB}
+    hdr_histogram_static)
 add_dependencies(PingPong hdr_histogram)
+
+target_include_directories(ExclusivePingPong
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
+target_link_libraries(ExclusivePingPong
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB}
+    hdr_histogram_static)
+add_dependencies(ExclusivePingPong hdr_histogram)
+
+target_include_directories(Throughput
+    PUBLIC ${AERON_C_CLIENT_SOURCE_PATH} ${AERON_CLIENT_WRAPPER_SOURCE_PATH})
+target_link_libraries(Throughput
+    ${CLIENT_WRAPPER_LINK_LIB} ${C_CLIENT_LINK_LIB})
 
 if (AERON_INSTALL_TARGETS)
     install(
-        TARGETS AeronStat BasicPublisher TimeTests BasicSubscriber StreamingPublisher RateSubscriber Ping Pong Throughput ErrorStat LossStat DriverTool ExclusiveThroughput PingPong
+        TARGETS
+        BasicPublisher
+        BasicSubscriber
+        RateSubscriber
+        Ping
+        Pong
+        PingPong
+        ExclusivePingPong
+        Throughput
         DESTINATION bin)
-endif()
+endif ()

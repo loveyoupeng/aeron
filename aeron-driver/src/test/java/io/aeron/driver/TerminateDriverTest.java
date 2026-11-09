@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,68 +16,82 @@
 package io.aeron.driver;
 
 import io.aeron.CommonContext;
-import org.junit.Test;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.SystemTestWatcher;
+import io.aeron.test.Tests;
+import io.aeron.test.driver.TestMediaDriver;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
-public class TerminateDriverTest
+@ExtendWith(InterruptingTestCallback.class)
+class TerminateDriverTest
 {
-    private final TerminationValidator mockTerminationValidator = mock(TerminationValidator.class);
+    @RegisterExtension
+    final SystemTestWatcher systemTestWatcher = new SystemTestWatcher();
 
-    @Test(timeout = 10_000)
-    public void shouldCallTerminationHookUponValidRequest()
+    @Test
+    void shouldCallTerminationHookUponValidRequest()
     {
+        final TerminationValidator mockTerminationValidator = mock(TerminationValidator.class);
         final AtomicBoolean hasTerminated = new AtomicBoolean(false);
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .dirDeleteOnStart(true)
             .dirDeleteOnShutdown(true)
-            .terminationHook(() -> hasTerminated.lazySet(true))
+            .terminationHook(() -> hasTerminated.set(true))
             .terminationValidator(mockTerminationValidator);
 
         when(mockTerminationValidator.allowTermination(any(), any(), anyInt(), anyInt())).thenReturn(true);
 
-        try (MediaDriver ignore = MediaDriver.launch(ctx))
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(ctx, systemTestWatcher))
         {
-            assertTrue(CommonContext.requestDriverTermination(ctx.aeronDirectory(), null, 0, 0));
+            assertTrue(CommonContext.requestDriverTermination(mediaDriver.context().aeronDirectory(), null, 0, 0));
 
-            while (!hasTerminated.get())
+            do
             {
-                Thread.yield();
+                Tests.yield();
             }
+            while (!hasTerminated.get());
         }
 
         verify(mockTerminationValidator).allowTermination(any(), any(), anyInt(), anyInt());
     }
 
-    @Test(timeout = 10_000)
-    public void shouldNotCallTerminationHookUponInvalidRequest()
+    @Test
+    @InterruptAfter(10)
+    void shouldNotCallTerminationHookUponInvalidRequest()
     {
-        final AtomicBoolean hasTerminated = new AtomicBoolean(false);
+        final AtomicBoolean hasTerminatedByHook = new AtomicBoolean(false);
         final AtomicBoolean hasCalledTerminationValidator = new AtomicBoolean(false);
         final MediaDriver.Context ctx = new MediaDriver.Context()
             .dirDeleteOnStart(true)
             .dirDeleteOnShutdown(true)
-            .terminationHook(() -> hasTerminated.lazySet(true))
+            .terminationHook(() -> hasTerminatedByHook.set(true))
             .terminationValidator((dir, buffer, offset, length) ->
             {
-                hasCalledTerminationValidator.lazySet(true);
+                hasCalledTerminationValidator.set(true);
                 return false;
             });
 
-        try (MediaDriver ignore = MediaDriver.launch(ctx))
+        try (TestMediaDriver mediaDriver = TestMediaDriver.launch(ctx, systemTestWatcher))
         {
-            assertTrue(CommonContext.requestDriverTermination(ctx.aeronDirectory(), null, 0, 0));
+            assertFalse(hasCalledTerminationValidator.get());
+            assertTrue(CommonContext.requestDriverTermination(mediaDriver.context().aeronDirectory(), null, 0, 0));
 
-            while (!hasCalledTerminationValidator.get())
+            do
             {
-                Thread.yield();
+                Tests.yield();
             }
+            while (!hasCalledTerminationValidator.get());
         }
 
-        assertFalse(hasTerminated.get());
+        assertFalse(hasTerminatedByHook.get());
     }
 }

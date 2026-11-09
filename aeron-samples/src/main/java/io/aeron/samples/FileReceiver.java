@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ import org.agrona.LangUtil;
 import org.agrona.SystemUtil;
 import org.agrona.collections.Long2ObjectHashMap;
 import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.SigInt;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 import org.agrona.concurrent.SleepingMillisIdleStrategy;
 import org.agrona.concurrent.UnsafeBuffer;
 
@@ -46,7 +46,7 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  * linked via the correlation id. Messages are encoded in {@link java.nio.ByteOrder#LITTLE_ENDIAN}.
  * <p>
  * The chunk size if best determined by {@link io.aeron.Publication#maxPayloadLength()} minus header for the chunk.
- *
+ * <p>
  * <b>file-create</b>
  * <pre>
  *   0                   1                   2                   3
@@ -93,20 +93,20 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public class FileReceiver
 {
-    public static final int VERSION = 0;
-    public static final int FILE_CREATE_TYPE = 1;
-    public static final int FILE_CHUNK_TYPE = 2;
+    static final int VERSION = 0;
+    static final int FILE_CREATE_TYPE = 1;
+    static final int FILE_CHUNK_TYPE = 2;
 
-    public static final int VERSION_OFFSET = 0;
-    public static final int TYPE_OFFSET = VERSION_OFFSET + SIZE_OF_INT;
-    public static final int CORRELATION_ID_OFFSET = TYPE_OFFSET + SIZE_OF_INT;
-    public static final int FILE_LENGTH_OFFSET = CORRELATION_ID_OFFSET + SIZE_OF_LONG;
+    static final int VERSION_OFFSET = 0;
+    static final int TYPE_OFFSET = VERSION_OFFSET + SIZE_OF_INT;
+    static final int CORRELATION_ID_OFFSET = TYPE_OFFSET + SIZE_OF_INT;
+    static final int FILE_LENGTH_OFFSET = CORRELATION_ID_OFFSET + SIZE_OF_LONG;
 
-    public static final int FILE_NAME_OFFSET = FILE_LENGTH_OFFSET + SIZE_OF_LONG;
+    static final int FILE_NAME_OFFSET = FILE_LENGTH_OFFSET + SIZE_OF_LONG;
 
-    public static final int CHUNK_OFFSET_OFFSET = CORRELATION_ID_OFFSET + SIZE_OF_LONG;
-    public static final int CHUNK_LENGTH_OFFSET = CHUNK_OFFSET_OFFSET + SIZE_OF_LONG;
-    public static final int CHUNK_PAYLOAD_OFFSET = CHUNK_LENGTH_OFFSET + SIZE_OF_LONG;
+    static final int CHUNK_OFFSET_OFFSET = CORRELATION_ID_OFFSET + SIZE_OF_LONG;
+    static final int CHUNK_LENGTH_OFFSET = CHUNK_OFFSET_OFFSET + SIZE_OF_LONG;
+    static final int CHUNK_PAYLOAD_OFFSET = CHUNK_LENGTH_OFFSET + SIZE_OF_LONG;
 
     private static final int STREAM_ID = SampleConfiguration.STREAM_ID;
     private static final String CHANNEL = SampleConfiguration.CHANNEL;
@@ -117,12 +117,17 @@ public class FileReceiver
     private final FragmentAssembler assembler = new FragmentAssembler(this::onFragment);
     private final Long2ObjectHashMap<UnsafeBuffer> fileSessionByIdMap = new Long2ObjectHashMap<>();
 
-    public FileReceiver(final File storageDir, final Subscription subscription)
+    FileReceiver(final File storageDir, final Subscription subscription)
     {
         this.storageDir = storageDir;
         this.subscription = subscription;
     }
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         final File storageDir;
@@ -143,11 +148,11 @@ public class FileReceiver
         System.out.println("Files stored to " + storageDir.getAbsolutePath());
 
         final IdleStrategy idleStrategy = new SleepingMillisIdleStrategy(1);
-        final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
 
-        try (MediaDriver ignore = MediaDriver.launch();
-            Aeron aeron = Aeron.connect();
+        final AtomicBoolean running = new AtomicBoolean(true);
+        try (ShutdownSignalBarrier barrier = new ShutdownSignalBarrier(() -> running.set(false));
+            MediaDriver mediaDriver = MediaDriver.launch(new MediaDriver.Context().terminationHook(barrier::signalAll));
+            Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName()));
             Subscription subscription = aeron.addSubscription(CHANNEL, STREAM_ID))
         {
             System.out.println("Receiving from " + CHANNEL + " on stream id " + STREAM_ID);
@@ -160,8 +165,7 @@ public class FileReceiver
         }
     }
 
-    @SuppressWarnings("unused")
-    public void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    private void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         final int version = buffer.getInt(offset + VERSION_OFFSET, LITTLE_ENDIAN);
         if (VERSION != version)

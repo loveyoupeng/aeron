@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,66 +15,140 @@
  */
 package io.aeron.cluster.service;
 
+import io.aeron.Aeron;
+import io.aeron.BufferBuilder;
 import io.aeron.Image;
-import io.aeron.ImageControlledFragmentAssembler;
-import io.aeron.cluster.client.*;
-import io.aeron.cluster.codecs.*;
-import io.aeron.logbuffer.*;
-import io.aeron.status.ReadableCounter;
-import org.agrona.*;
+import io.aeron.cluster.ConsensusModule;
+import io.aeron.cluster.client.AeronCluster;
+import io.aeron.cluster.client.ClusterException;
+import io.aeron.cluster.codecs.ClusterActionRequestDecoder;
+import io.aeron.cluster.codecs.MembershipChangeEventDecoder;
+import io.aeron.cluster.codecs.MessageHeaderDecoder;
+import io.aeron.cluster.codecs.NewLeadershipTermEventDecoder;
+import io.aeron.cluster.codecs.SessionCloseEventDecoder;
+import io.aeron.cluster.codecs.SessionMessageHeaderDecoder;
+import io.aeron.cluster.codecs.SessionOpenEventDecoder;
+import io.aeron.cluster.codecs.TimerEventDecoder;
+import io.aeron.logbuffer.ControlledFragmentHandler;
+import io.aeron.logbuffer.Header;
+import org.agrona.BitUtil;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
+
+import static io.aeron.logbuffer.FrameDescriptor.BEGIN_FRAG_FLAG;
+import static io.aeron.logbuffer.FrameDescriptor.END_FRAG_FLAG;
+import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
+import static io.aeron.logbuffer.FrameDescriptor.UNFRAGMENTED;
+import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
 
 /**
- * Adapter for reading a log with a upper bound applied beyond which the consumer cannot progress.
+ * Adapter for reading a log with an upper-bound applied beyond which the consumer cannot progress.
  */
 final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseable
 {
-    private static final int FRAGMENT_LIMIT = 100;
-    private static final int INITIAL_BUFFER_LENGTH = 4096;
-
-    private final ImageControlledFragmentAssembler fragmentAssembler = new ImageControlledFragmentAssembler(
-        this, INITIAL_BUFFER_LENGTH, true);
+    private final int fragmentLimit;
+    private long maxLogPosition;
+    private Image image;
+    private final ClusteredServiceAgent agent;
+    private final BufferBuilder builder = new BufferBuilder();
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
-    private final SessionOpenEventDecoder openEventDecoder = new SessionOpenEventDecoder();
-    private final SessionCloseEventDecoder closeEventDecoder = new SessionCloseEventDecoder();
     private final SessionMessageHeaderDecoder sessionHeaderDecoder = new SessionMessageHeaderDecoder();
     private final TimerEventDecoder timerEventDecoder = new TimerEventDecoder();
+    private final SessionOpenEventDecoder openEventDecoder = new SessionOpenEventDecoder();
+    private final SessionCloseEventDecoder closeEventDecoder = new SessionCloseEventDecoder();
     private final ClusterActionRequestDecoder actionRequestDecoder = new ClusterActionRequestDecoder();
     private final NewLeadershipTermEventDecoder newLeadershipTermEventDecoder = new NewLeadershipTermEventDecoder();
-    private final MembershipChangeEventDecoder membershipChangeEventDecoder = new MembershipChangeEventDecoder();
 
-    private final Image image;
-    private final ReadableCounter upperBound;
-    private final ClusteredServiceAgent agent;
-
-    BoundedLogAdapter(final Image image, final ReadableCounter upperBound, final ClusteredServiceAgent agent)
+    BoundedLogAdapter(final ClusteredServiceAgent agent, final int fragmentLimit)
     {
-        this.image = image;
-        this.upperBound = upperBound;
         this.agent = agent;
+        this.fragmentLimit = fragmentLimit;
     }
 
     public void close()
     {
-        CloseHelper.close(image.subscription());
+        if (null != image)
+        {
+            CloseHelper.close(image.subscription());
+            image = null;
+        }
+    }
+
+    public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    {
+        Action action = Action.CONTINUE;
+        final byte flags = header.flags();
+
+        if ((flags & UNFRAGMENTED) == UNFRAGMENTED)
+        {
+            action = onMessage(buffer, offset, length, header);
+        }
+        else if ((flags & BEGIN_FRAG_FLAG) == BEGIN_FRAG_FLAG)
+        {
+            builder.reset()
+                .captureHeader(header)
+                .append(buffer, offset, length)
+                .nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
+        }
+        else if (offset == builder.nextTermOffset())
+        {
+            final int limit = builder.limit();
+
+            builder.append(buffer, offset, length);
+
+            if ((flags & END_FRAG_FLAG) == END_FRAG_FLAG)
+            {
+                action = onMessage(builder.buffer(), 0, builder.limit(), builder.completeHeader(header));
+
+                if (Action.ABORT == action)
+                {
+                    builder.limit(limit);
+                }
+                else
+                {
+                    builder.reset();
+                }
+            }
+            else
+            {
+                builder.nextTermOffset(BitUtil.align(offset + length + HEADER_LENGTH, FRAME_ALIGNMENT));
+            }
+        }
+        else
+        {
+            builder.reset();
+        }
+
+        return action;
+    }
+
+    void maxLogPosition(final long position)
+    {
+        maxLogPosition = position;
     }
 
     boolean isDone()
     {
-        return image.isEndOfStream() || image.isClosed();
+        return image.position() >= maxLogPosition || image.isEndOfStream() || image.isClosed();
     }
 
-    public long position()
+    void image(final Image image)
     {
-        return image.position();
+        this.image = image;
     }
 
-    public int poll()
+    Image image()
     {
-        return image.boundedControlledPoll(fragmentAssembler, upperBound.get(), FRAGMENT_LIMIT);
+        return image;
+    }
+
+    int poll(final long limit)
+    {
+        return image.boundedControlledPoll(this, limit, fragmentLimit);
     }
 
     @SuppressWarnings("MethodLength")
-    public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    private Action onMessage(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
@@ -163,11 +237,19 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
+                final int flags = ClusterActionRequestDecoder.flagsNullValue() != actionRequestDecoder.flags() ?
+                    actionRequestDecoder.flags() : ConsensusModule.CLUSTER_ACTION_FLAGS_DEFAULT;
+
+                final long termBaseLogPosition = ClusterActionRequestDecoder.termBaseLogPositionNullValue() !=
+                    actionRequestDecoder.termBaseLogPosition() ? actionRequestDecoder.termBaseLogPosition() :
+                    Aeron.NULL_VALUE;
                 agent.onServiceAction(
                     actionRequestDecoder.leadershipTermId(),
+                    termBaseLogPosition,
                     actionRequestDecoder.logPosition(),
                     actionRequestDecoder.timestamp(),
-                    actionRequestDecoder.action());
+                    actionRequestDecoder.action(),
+                    flags);
                 break;
 
             case NewLeadershipTermEventDecoder.TEMPLATE_ID:
@@ -189,21 +271,7 @@ final class BoundedLogAdapter implements ControlledFragmentHandler, AutoCloseabl
                 break;
 
             case MembershipChangeEventDecoder.TEMPLATE_ID:
-                membershipChangeEventDecoder.wrap(
-                    buffer,
-                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                    messageHeaderDecoder.blockLength(),
-                    messageHeaderDecoder.version());
-
-                agent.onMembershipChange(
-                    membershipChangeEventDecoder.leadershipTermId(),
-                    membershipChangeEventDecoder.logPosition(),
-                    membershipChangeEventDecoder.timestamp(),
-                    membershipChangeEventDecoder.leaderMemberId(),
-                    membershipChangeEventDecoder.clusterSize(),
-                    membershipChangeEventDecoder.changeType(),
-                    membershipChangeEventDecoder.memberId(),
-                    membershipChangeEventDecoder.clusterMembers());
+                // Removed Dynamic Join.
                 break;
         }
 

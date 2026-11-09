@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,6 +37,14 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
     private final LossGenerator controlLossGenerator;
     private final UnsafeBuffer controlBuffer = new UnsafeBuffer(ByteBuffer.allocate(0));
 
+    /**
+     * Construct a {@link ReceiveChannelEndpoint} with defaults for loss from {@link DebugChannelEndpointConfiguration}.
+     *
+     * @param udpChannel      for the media.
+     * @param dispatcher      for forwarding packets.
+     * @param statusIndicator for the endpoint for the channel.
+     * @param context         for configuration.
+     */
     public DebugReceiveChannelEndpoint(
         final UdpChannel udpChannel,
         final DataPacketDispatcher dispatcher,
@@ -52,6 +60,16 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
             DebugChannelEndpointConfiguration.receiveControlLossGeneratorSupplier());
     }
 
+    /**
+     * Construct a {@link ReceiveChannelEndpoint} with configuration for loss rate and seed.
+     *
+     * @param udpChannel           for the media.
+     * @param dispatcher           for forwarding packets.
+     * @param statusIndicator      for the endpoint for the channel.
+     * @param context              for configuration.
+     * @param dataLossGenerator    for the random loss on the data stream.
+     * @param controlLossGenerator for the random loss on the control stream.
+     */
     public DebugReceiveChannelEndpoint(
         final UdpChannel udpChannel,
         final DataPacketDispatcher dispatcher,
@@ -66,19 +84,27 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
         this.controlLossGenerator = controlLossGenerator;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public int sendTo(final ByteBuffer buffer, final InetSocketAddress remoteAddress)
     {
-        int result = buffer.remaining();
+        int count = buffer.remaining();
 
-        controlBuffer.wrap(buffer, buffer.position(), buffer.remaining());
-        if (!controlLossGenerator.shouldDropFrame(remoteAddress, controlBuffer, buffer.remaining()))
+        controlBuffer.wrap(buffer, buffer.position(), count);
+        if (!controlLossGenerator.shouldDropFrame(remoteAddress, controlBuffer, count))
         {
-            result = super.sendTo(buffer, remoteAddress);
+            count = super.sendTo(buffer, remoteAddress);
         }
 
-        return result;
+        return count;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public int onDataPacket(
         final DataHeaderFlyweight header,
         final UnsafeBuffer buffer,
@@ -88,7 +114,8 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
     {
         int result = 0;
 
-        if (!dataLossGenerator.shouldDropFrame(srcAddress, buffer, length))
+        if (!dataLossGenerator.shouldDropFrame(
+            srcAddress, buffer, header.streamId(), header.sessionId(), header.termId(), header.termOffset(), length))
         {
             result = super.onDataPacket(header, buffer, length, srcAddress, transportIndex);
         }
@@ -96,6 +123,10 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
         return result;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onSetupMessage(
         final SetupFlyweight header,
         final UnsafeBuffer buffer,
@@ -103,12 +134,16 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
         final InetSocketAddress srcAddress,
         final int transportIndex)
     {
-        if (!dataLossGenerator.shouldDropFrame(srcAddress, buffer, header.frameLength()))
+        if (!dataLossGenerator.shouldDropFrame(srcAddress, buffer, length))
         {
             super.onSetupMessage(header, buffer, length, srcAddress, transportIndex);
         }
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onRttMeasurement(
         final RttMeasurementFlyweight header,
         final UnsafeBuffer buffer,
@@ -116,7 +151,7 @@ public class DebugReceiveChannelEndpoint extends ReceiveChannelEndpoint
         final InetSocketAddress srcAddress,
         final int transportIndex)
     {
-        if (!dataLossGenerator.shouldDropFrame(srcAddress, buffer, header.frameLength()))
+        if (!dataLossGenerator.shouldDropFrame(srcAddress, buffer, length))
         {
             super.onRttMeasurement(header, buffer, length, srcAddress, transportIndex);
         }

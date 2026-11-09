@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,99 +15,91 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.Counter;
+import io.aeron.ExclusivePublication;
 import io.aeron.Image;
-import io.aeron.Publication;
-import io.aeron.archive.Archive;
 import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.cluster.client.AeronCluster;
+import io.aeron.cluster.service.ClientSession;
 import io.aeron.cluster.service.Cluster;
 import io.aeron.cluster.service.ClusteredService;
 import io.aeron.cluster.service.ClusteredServiceContainer;
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
 import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.test.InterruptAfter;
+import io.aeron.test.InterruptingTestCallback;
+import io.aeron.test.TestContexts;
+import io.aeron.test.Tests;
+import io.aeron.test.cluster.ClusterTests;
+import io.aeron.test.cluster.StubClusteredService;
 import org.agrona.CloseHelper;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersReader;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static io.aeron.cluster.ClusterTestConstants.CLUSTER_MEMBERS;
+import static io.aeron.cluster.ClusterTestConstants.INGRESS_ENDPOINTS;
 import static org.agrona.BitUtil.SIZE_OF_INT;
-import static org.junit.Assert.*;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.*;
 
-public class ClusterTimerTest
+@ExtendWith(InterruptingTestCallback.class)
+abstract class ClusterTimerTest
 {
-    private static final long MAX_CATALOG_ENTRIES = 128;
     private static final int INTERVAL_MS = 20;
 
     private ClusteredMediaDriver clusteredMediaDriver;
     private ClusteredServiceContainer container;
     private AeronCluster aeronCluster;
 
-    private final AtomicLong snapshotCount = new AtomicLong();
-    private final Counter mockSnapshotCounter = mock(Counter.class);
-
-    @Before
-    public void before()
+    @BeforeEach
+    void before()
     {
-        when(mockSnapshotCounter.incrementOrdered()).thenAnswer((inv) -> snapshotCount.getAndIncrement());
-
         launchClusteredMediaDriver(true);
     }
 
-    @After
-    public void after()
+    @AfterEach
+    void after()
     {
-        CloseHelper.close(aeronCluster);
-        CloseHelper.close(container);
-        CloseHelper.close(clusteredMediaDriver);
+        final ConsensusModule consensusModule = null == clusteredMediaDriver ?
+            null : clusteredMediaDriver.consensusModule();
+
+        CloseHelper.closeAll(aeronCluster, consensusModule, container, clusteredMediaDriver);
 
         if (null != clusteredMediaDriver)
         {
             clusteredMediaDriver.consensusModule().context().deleteDirectory();
-            clusteredMediaDriver.archive().context().deleteArchiveDirectory();
+            clusteredMediaDriver.archive().context().deleteDirectory();
+            clusteredMediaDriver.mediaDriver().context().deleteDirectory();
+            container.context().deleteDirectory();
         }
     }
 
-    @Test(timeout = 10_000)
-    public void shouldRestartServiceWithTimerFromSnapshotWithFurtherLog()
+    @Test
+    @InterruptAfter(10)
+    void shouldRestartServiceWithTimerFromSnapshotWithFurtherLog()
     {
-        final AtomicInteger triggeredTimersCounter = new AtomicInteger();
+        final AtomicLong triggeredTimersCounter = new AtomicLong();
 
         launchReschedulingService(triggeredTimersCounter);
         connectClient();
 
-        while (triggeredTimersCounter.get() < 2)
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(triggeredTimersCounter, 2);
 
         final CountersReader counters = aeronCluster.context().aeron().countersReader();
-        final AtomicCounter controlToggle = ClusterControl.findControlToggle(counters);
+        final int clusterId = clusteredMediaDriver.consensusModule().context().clusterId();
+        final AtomicCounter controlToggle = ClusterControl.findControlToggle(counters, clusterId);
         assertNotNull(controlToggle);
         assertTrue(ClusterControl.ToggleState.SNAPSHOT.toggle(controlToggle));
 
-        while (snapshotCount.get() == 0)
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
-
-        while (triggeredTimersCounter.get() < 4)
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(clusteredMediaDriver.consensusModule().context().snapshotCounter(), 1);
+        Tests.awaitValue(triggeredTimersCounter, 4);
 
         forceCloseForRestart();
         triggeredTimersCounter.set(0);
@@ -116,54 +108,39 @@ public class ClusterTimerTest
         launchReschedulingService(triggeredTimersCounter);
         connectClient();
 
-        while (triggeredTimersCounter.get() < (2 + 4))
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(triggeredTimersCounter, 2 + 4);
 
         forceCloseForRestart();
-        final int triggeredSinceStart = triggeredTimersCounter.getAndSet(0);
-
-        triggeredTimersCounter.set(0);
+        final long triggeredSinceStart = triggeredTimersCounter.getAndSet(0);
 
         launchClusteredMediaDriver(false);
         launchReschedulingService(triggeredTimersCounter);
         connectClient();
 
-        while (triggeredTimersCounter.get() < (triggeredSinceStart + 4))
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(triggeredTimersCounter, triggeredSinceStart + 4);
+
+        ClusterTests.failOnClusterError();
     }
 
-    @Test(timeout = 10_000)
-    public void shouldTriggerRescheduledTimerAfterReplay()
+    @Test
+    @InterruptAfter(10)
+    void shouldTriggerRescheduledTimerAfterReplay()
     {
-        final AtomicInteger triggeredTimersCounter = new AtomicInteger();
+        final AtomicLong triggeredTimersCounter = new AtomicLong();
 
         launchReschedulingService(triggeredTimersCounter);
         connectClient();
 
-        while (triggeredTimersCounter.get() < 2)
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(triggeredTimersCounter, 2);
 
         forceCloseForRestart();
 
-        int triggeredSinceStart = triggeredTimersCounter.getAndSet(0);
+        long triggeredSinceStart = triggeredTimersCounter.getAndSet(0);
 
         launchClusteredMediaDriver(false);
         launchReschedulingService(triggeredTimersCounter);
 
-        while (triggeredTimersCounter.get() <= (triggeredSinceStart + 2))
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(triggeredTimersCounter, triggeredSinceStart + 2);
 
         forceCloseForRestart();
 
@@ -172,23 +149,75 @@ public class ClusterTimerTest
         launchClusteredMediaDriver(false);
         launchReschedulingService(triggeredTimersCounter);
 
-        while (triggeredTimersCounter.get() <= (triggeredSinceStart + 4))
-        {
-            TestUtil.checkInterruptedStatus();
-            Thread.yield();
-        }
+        Tests.awaitValue(triggeredTimersCounter, triggeredSinceStart + 4);
+
+        ClusterTests.failOnClusterError();
     }
 
-    private void launchReschedulingService(final AtomicInteger triggeredTimersCounter)
+    @Test
+    @InterruptAfter(10)
+    void shouldRescheduleTimerWhenSchedulingWithExistingCorrelationId()
+    {
+        final AtomicLong timerCounter1 = new AtomicLong();
+        final AtomicLong timerCounter2 = new AtomicLong();
+
+        final ClusteredService service = new StubClusteredService()
+        {
+            public void onSessionOpen(final ClientSession session, final long timestamp)
+            {
+                schedule(1, timestamp + 1_000_000); // Too far in the future
+                schedule(1, timestamp + 20);
+                schedule(2, timestamp + 30);
+            }
+
+            public void onTimerEvent(final long correlationId, final long timestamp)
+            {
+                if (correlationId == 1)
+                {
+                    timerCounter1.incrementAndGet();
+                }
+                else
+                {
+                    timerCounter2.incrementAndGet();
+                }
+            }
+
+            private void schedule(final long correlationId, final long deadlineMs)
+            {
+                idleStrategy.reset();
+                while (!cluster.scheduleTimer(correlationId, deadlineMs))
+                {
+                    idleStrategy.idle();
+                }
+            }
+        };
+
+        container = ClusteredServiceContainer.launch(
+            new ClusteredServiceContainer.Context()
+                .clusteredService(service)
+                .terminationHook(ClusterTests.NOOP_TERMINATION_HOOK)
+                .errorHandler(ClusterTests.errorHandler(0)));
+
+        connectClient();
+
+        Tests.awaitValue(timerCounter2, 1);
+        assertEquals(1, timerCounter1.get());
+
+        ClusterTests.failOnClusterError();
+    }
+
+    abstract TimerServiceSupplier timerServiceSupplier();
+
+    private void launchReschedulingService(final AtomicLong triggeredTimersCounter)
     {
         final ClusteredService service = new StubClusteredService()
         {
-            int timerId = 1;
+            private int timerCorrelationId = 1;
 
             public void onTimerEvent(final long correlationId, final long timestamp)
             {
                 triggeredTimersCounter.getAndIncrement();
-                scheduleNext(serviceCorrelationId(timerId++), timestamp + INTERVAL_MS);
+                scheduleNext(serviceCorrelationId(timerCorrelationId++), timestamp + INTERVAL_MS);
             }
 
             public void onStart(final Cluster cluster, final Image snapshotImage)
@@ -199,29 +228,30 @@ public class ClusterTimerTest
                 if (null != snapshotImage)
                 {
                     final FragmentHandler fragmentHandler =
-                        (buffer, offset, length, header) -> timerId = buffer.getInt(offset);
+                        (buffer, offset, length, header) -> timerCorrelationId = buffer.getInt(offset);
 
                     while (true)
                     {
                         final int fragments = snapshotImage.poll(fragmentHandler, 1);
-                        if (fragments == 1)
+                        if (fragments == 1 || snapshotImage.isEndOfStream())
                         {
                             break;
                         }
 
-                        cluster.idle();
+                        idleStrategy.idle();
                     }
                 }
             }
 
-            public void onTakeSnapshot(final Publication snapshotPublication)
+            public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
             {
                 final ExpandableArrayBuffer buffer = new ExpandableArrayBuffer(SIZE_OF_INT);
-                buffer.putInt(0, timerId);
+                buffer.putInt(0, timerCorrelationId);
 
+                idleStrategy.reset();
                 while (snapshotPublication.offer(buffer, 0, SIZE_OF_INT) < 0)
                 {
-                    cluster.idle();
+                    idleStrategy.idle();
                 }
             }
 
@@ -235,14 +265,15 @@ public class ClusterTimerTest
                 final TimeUnit timeUnit,
                 final int appVersion)
             {
-                scheduleNext(serviceCorrelationId(timerId++), timestamp + INTERVAL_MS);
+                scheduleNext(serviceCorrelationId(timerCorrelationId++), timestamp + INTERVAL_MS);
             }
 
             private void scheduleNext(final long correlationId, final long deadlineMs)
             {
+                idleStrategy.reset();
                 while (!cluster.scheduleTimer(correlationId, deadlineMs))
                 {
-                    cluster.idle();
+                    idleStrategy.idle();
                 }
             }
         };
@@ -250,50 +281,46 @@ public class ClusterTimerTest
         container = ClusteredServiceContainer.launch(
             new ClusteredServiceContainer.Context()
                 .clusteredService(service)
-                .terminationHook(TestUtil.TERMINATION_HOOK)
-                .errorHandler(TestUtil.errorHandler(0)));
-    }
-
-    private AeronCluster connectToCluster()
-    {
-        return AeronCluster.connect();
+                .terminationHook(ClusterTests.NOOP_TERMINATION_HOOK)
+                .errorHandler(ClusterTests.errorHandler(0)));
     }
 
     private void forceCloseForRestart()
     {
-        clusteredMediaDriver.consensusModule().close();
-        container.close();
-        aeronCluster.close();
-        clusteredMediaDriver.close();
+        CloseHelper.closeAll(aeronCluster, container, clusteredMediaDriver);
     }
 
     private void connectClient()
     {
-        aeronCluster = null;
-        aeronCluster = connectToCluster();
+        aeronCluster = AeronCluster.connect(new AeronCluster.Context()
+                .ingressChannel("aeron:udp")
+                .ingressEndpoints(INGRESS_ENDPOINTS)
+                .egressChannel("aeron:udp?endpoint=localhost:0"));
     }
 
     private void launchClusteredMediaDriver(final boolean initialLaunch)
     {
-        clusteredMediaDriver = null;
-
         clusteredMediaDriver = ClusteredMediaDriver.launch(
             new MediaDriver.Context()
                 .warnIfDirectoryExists(initialLaunch)
                 .threadingMode(ThreadingMode.SHARED)
                 .termBufferSparseFile(true)
-                .errorHandler(TestUtil.errorHandler(0))
-                .dirDeleteOnShutdown(true)
+                .errorHandler(ClusterTests.errorHandler(0))
                 .dirDeleteOnStart(true),
-            new Archive.Context()
-                .maxCatalogEntries(MAX_CATALOG_ENTRIES)
+            TestContexts.localhostArchive()
+                .catalogCapacity(ClusterTestConstants.CATALOG_CAPACITY)
+                .errorHandler(ClusterTests.errorHandler(0))
                 .threadingMode(ArchiveThreadingMode.SHARED)
                 .recordingEventsEnabled(false)
                 .deleteArchiveOnStart(initialLaunch),
             new ConsensusModule.Context()
-                .errorHandler(TestUtil.errorHandler(0))
-                .snapshotCounter(mockSnapshotCounter)
-                .terminationHook(TestUtil.TERMINATION_HOOK)
+                .errorHandler(ClusterTests.errorHandler(0))
+                .logChannel("aeron:ipc")
+                .replicationChannel("aeron:udp?endpoint=localhost:0")
+                .ingressChannel("aeron:udp")
+                .clusterMembers(CLUSTER_MEMBERS)
+                .terminationHook(ClusterTests.NOOP_TERMINATION_HOOK)
+                .timerServiceSupplier(timerServiceSupplier())
                 .deleteDirOnStart(initialLaunch));
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,29 +16,64 @@
 package io.aeron.driver;
 
 /**
- * Delay generator that simply returns a constant value (such as 0)
+ * Delay generator that simply returns a constant value for the delay and the retry delay.
  */
-public class StaticDelayGenerator implements FeedbackDelayGenerator
+public final class StaticDelayGenerator implements FeedbackDelayGenerator
 {
+    /**
+     * {@link StaticDelayGenerator} instance with zero delay.
+     */
+    public static final StaticDelayGenerator ZERO_DELAY_GENERATOR = new StaticDelayGenerator(0);
+
     private final long delayInNs;
-    private final boolean immediateFeedback;
+    private final long retryDelayNs;
 
     /**
-     * Create a delayInNs generator that uses the specified delayInNs.
+     * Create a delayInNs generator that uses the specified delayNs.
      *
-     * @param delayInNs         to return
-     * @param immediateFeedback or not
+     * @param delayNs      initial delay (nanoseconds)
+     * @param retryDelayNs delay for retry (nanoseconds)
      */
-    public StaticDelayGenerator(final long delayInNs, final boolean immediateFeedback)
+    public StaticDelayGenerator(final long delayNs, final long retryDelayNs)
     {
-        this.delayInNs = delayInNs;
-        this.immediateFeedback = immediateFeedback;
+        this.delayInNs = delayNs;
+        this.retryDelayNs = retryDelayNs;
+    }
+
+    /**
+     * Create a delayInNs generator that uses the specified delayNs for both initial and retry delays.
+     *
+     * @param delayNs      delay (nanoseconds)
+     */
+    public StaticDelayGenerator(final long delayNs)
+    {
+        this(delayNs, delayNs);
+    }
+
+    /**
+     * Deprecated constructor.
+     *
+     * @param delayNs           delay (nanoseconds)
+     * @param immediateFeedback immediately feedback (unused)
+     * @deprecated The <code>shouldImmediatelyFeedback</code> method has been removed from the interface so the
+     * <code>immediatelyFeedback</code> parameter is ignored. You can emulate the old behaviour with:
+     * <pre>
+     *     new StaticDelayGenerator(0, MILLISECONDS.toNanos(10));
+     * </pre>
+     * If used for unicast delays, then this is not recommended and a short delay like the default
+     * {@link Configuration#NAK_UNICAST_DELAY_DEFAULT_NS} should be used.
+     */
+    @Deprecated
+    public StaticDelayGenerator(final long delayNs, @SuppressWarnings("unused") final boolean immediateFeedback)
+    {
+        this(delayNs, delayNs);
     }
 
     /**
      * {@inheritDoc}
      */
-    public long generateDelay()
+    @Override
+    public long generateDelayNs()
     {
         return delayInNs;
     }
@@ -46,16 +81,21 @@ public class StaticDelayGenerator implements FeedbackDelayGenerator
     /**
      * {@inheritDoc}
      */
-    public boolean shouldFeedbackImmediately()
+    @Override
+    public long retryDelayNs()
     {
-        return immediateFeedback;
+        return retryDelayNs;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "StaticDelayGenerator{" +
             "delayInNs=" + delayInNs +
-            ", shouldFeedbackImmediately=" + shouldFeedbackImmediately() +
+            ", retryDelayNs=" + retryDelayNs +
             '}';
     }
 }

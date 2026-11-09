@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,71 +27,125 @@ import static io.aeron.cluster.client.AeronCluster.SESSION_HEADER_LENGTH;
 /**
  * Adapter for dispatching egress messages from a cluster to a {@link EgressListener}.
  */
-public class EgressAdapter implements FragmentHandler
+public final class EgressAdapter implements FragmentHandler
 {
     private final long clusterSessionId;
     private final int fragmentLimit;
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final SessionEventDecoder sessionEventDecoder = new SessionEventDecoder();
     private final NewLeaderEventDecoder newLeaderEventDecoder = new NewLeaderEventDecoder();
+    private final AdminResponseDecoder adminResponseDecoder = new AdminResponseDecoder();
     private final SessionMessageHeaderDecoder sessionMessageHeaderDecoder = new SessionMessageHeaderDecoder();
     private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this);
     private final EgressListener listener;
+    private final EgressListenerExtension listenerExtension;
     private final Subscription subscription;
 
+    /**
+     * Construct an adapter for cluster egress which consumes from the subscription and dispatches to the
+     * {@link EgressListener}.
+     *
+     * @param listener         to dispatch events to.
+     * @param clusterSessionId for the egress.
+     * @param subscription     over the egress stream.
+     * @param fragmentLimit    to poll on each {@link #poll()} operation.
+     */
     public EgressAdapter(
         final EgressListener listener,
         final long clusterSessionId,
         final Subscription subscription,
         final int fragmentLimit)
     {
-        this.clusterSessionId = clusterSessionId;
-        this.listener = listener;
-        this.subscription = subscription;
-        this.fragmentLimit = fragmentLimit;
+        this(listener, null, clusterSessionId, subscription, fragmentLimit);
     }
 
+    /**
+     * Construct an adapter for cluster egress which consumes from the subscription and dispatches to the
+     * {@link EgressListener} or extension messages to {@link EgressListenerExtension}.
+     *
+     * @param listener          to dispatch events to.
+     * @param listenerExtension to dispatch extension messages to
+     * @param clusterSessionId  for the egress.
+     * @param subscription      over the egress stream.
+     * @param fragmentLimit     to poll on each {@link #poll()} operation.
+     */
+    public EgressAdapter(
+        final EgressListener listener,
+        final EgressListenerExtension listenerExtension,
+        final long clusterSessionId,
+        final Subscription subscription,
+        final int fragmentLimit)
+    {
+        this.clusterSessionId = clusterSessionId;
+        this.fragmentLimit = fragmentLimit;
+        this.listener = listener;
+        this.listenerExtension = listenerExtension;
+        this.subscription = subscription;
+    }
+
+    /**
+     * Poll the egress subscription and dispatch assembled events to the {@link EgressListener}.
+     *
+     * @return the number of fragments consumed.
+     */
     public int poll()
     {
         return subscription.poll(fragmentAssembler, fragmentLimit);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    @SuppressWarnings("MethodLength")
     public void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         messageHeaderDecoder.wrap(buffer, offset);
 
+        final int templateId = messageHeaderDecoder.templateId();
         final int schemaId = messageHeaderDecoder.schemaId();
         if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
         {
-            throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
-        }
-
-        final int templateId = messageHeaderDecoder.templateId();
-        if (SessionMessageHeaderDecoder.TEMPLATE_ID == templateId)
-        {
-            sessionMessageHeaderDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
-
-            final long sessionId = sessionMessageHeaderDecoder.clusterSessionId();
-            if (sessionId == clusterSessionId)
+            if (listenerExtension != null)
             {
-                listener.onMessage(
-                    sessionId,
-                    sessionMessageHeaderDecoder.timestamp(),
+                listenerExtension.onExtensionMessage(
+                    messageHeaderDecoder.blockLength(),
+                    templateId,
+                    schemaId,
+                    messageHeaderDecoder.version(),
                     buffer,
-                    offset + SESSION_HEADER_LENGTH,
-                    length - SESSION_HEADER_LENGTH,
-                    header);
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    length - MessageHeaderDecoder.ENCODED_LENGTH);
+                return;
             }
-
-            return;
+            throw new ClusterException("expected schemaId=" +
+                MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
         switch (templateId)
         {
+            case SessionMessageHeaderDecoder.TEMPLATE_ID:
+            {
+                sessionMessageHeaderDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = sessionMessageHeaderDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    listener.onMessage(
+                        sessionId,
+                        sessionMessageHeaderDecoder.timestamp(),
+                        buffer,
+                        offset + SESSION_HEADER_LENGTH,
+                        length - SESSION_HEADER_LENGTH,
+                        header);
+                }
+                break;
+            }
+
             case SessionEventDecoder.TEMPLATE_ID:
             {
                 sessionEventDecoder.wrap(
@@ -103,7 +157,7 @@ public class EgressAdapter implements FragmentHandler
                 final long sessionId = sessionEventDecoder.clusterSessionId();
                 if (sessionId == clusterSessionId)
                 {
-                    listener.sessionEvent(
+                    listener.onSessionEvent(
                         sessionEventDecoder.correlationId(),
                         sessionId,
                         sessionEventDecoder.leadershipTermId(),
@@ -125,14 +179,51 @@ public class EgressAdapter implements FragmentHandler
                 final long sessionId = newLeaderEventDecoder.clusterSessionId();
                 if (sessionId == clusterSessionId)
                 {
-                    listener.newLeader(
+                    listener.onNewLeader(
                         sessionId,
                         newLeaderEventDecoder.leadershipTermId(),
                         newLeaderEventDecoder.leaderMemberId(),
-                        newLeaderEventDecoder.memberEndpoints());
+                        newLeaderEventDecoder.ingressEndpoints());
                 }
                 break;
             }
+
+            case AdminResponseDecoder.TEMPLATE_ID:
+            {
+                adminResponseDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
+
+                final long sessionId = adminResponseDecoder.clusterSessionId();
+                if (sessionId == clusterSessionId)
+                {
+                    final long correlationId = adminResponseDecoder.correlationId();
+                    final AdminRequestType requestType = adminResponseDecoder.requestType();
+                    final AdminResponseCode responseCode = adminResponseDecoder.responseCode();
+                    final String message = adminResponseDecoder.message();
+                    final int payloadOffset = adminResponseDecoder.offset() +
+                        AdminResponseDecoder.BLOCK_LENGTH +
+                        AdminResponseDecoder.messageHeaderLength() +
+                        message.length() +
+                        AdminResponseDecoder.payloadHeaderLength();
+                    final int payloadLength = adminResponseDecoder.payloadLength();
+                    listener.onAdminResponse(
+                        sessionId,
+                        correlationId,
+                        requestType,
+                        responseCode,
+                        message,
+                        buffer,
+                        payloadOffset,
+                        payloadLength);
+                }
+                break;
+            }
+
+            default:
+                break;
         }
     }
 }

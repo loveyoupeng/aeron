@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import static io.aeron.driver.status.StreamCounter.REGISTRATION_ID_OFFSET;
 import static io.aeron.driver.status.StreamCounter.SESSION_ID_OFFSET;
 import static io.aeron.driver.status.StreamCounter.STREAM_ID_OFFSET;
 
+import io.aeron.Aeron;
 import io.aeron.driver.status.PublisherLimit;
 import io.aeron.driver.status.PublisherPos;
 import io.aeron.driver.status.ReceiverHwm;
@@ -53,6 +54,11 @@ public class BacklogStat
 {
     private final CountersReader counters;
 
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     */
     public static void main(final String[] args)
     {
         final CountersReader counters = SamplesUtil.mapCounters();
@@ -61,6 +67,11 @@ public class BacklogStat
         backlogStat.print(System.out);
     }
 
+    /**
+     * Construct by using a {@link CountersReader} which can be obtained from {@link Aeron#countersReader()}.
+     *
+     * @param counters to read for tracking positions.
+     */
     public BacklogStat(final CountersReader counters)
     {
         this.counters = counters;
@@ -186,7 +197,7 @@ public class BacklogStat
                 }
                 else
                 {
-                    builder.append("\n└─no sender yet...");
+                    builder.append("\n└─no sender");
                 }
             }
 
@@ -222,12 +233,19 @@ public class BacklogStat
     /**
      * Composite key which identifies an Aeron stream of messages.
      */
-    public static class StreamCompositeKey
+    public static final class StreamCompositeKey
     {
         private final int sessionId;
         private final int streamId;
         private final String channel;
 
+        /**
+         * Construct a key to represent a unique stream.
+         *
+         * @param sessionId for the stream.
+         * @param streamId  for the stream within a channel.
+         * @param channel   as a URI.
+         */
         public StreamCompositeKey(final int sessionId, final int streamId, final String channel)
         {
             Objects.requireNonNull(channel, "channel cannot be null");
@@ -237,21 +255,40 @@ public class BacklogStat
             this.channel = channel;
         }
 
+        /**
+         * The session id of the stream.
+         *
+         * @return session id of the stream.
+         */
         public int sessionId()
         {
             return sessionId;
         }
 
+        /**
+         * The stream id within a channel.
+         *
+         * @return  stream id within a channel.
+         */
         public int streamId()
         {
             return streamId;
         }
 
+        /**
+         * The channel as a URI.
+         *
+         * @return channel as a URI.
+         */
         public String channel()
         {
             return channel;
         }
 
+        /**
+         * {@inheritDoc}
+         */
+        @Override
         public boolean equals(final Object o)
         {
             if (this == o)
@@ -271,6 +308,10 @@ public class BacklogStat
                 this.channel.equals(that.channel);
         }
 
+        /**
+         * {@inheritDoc}
+         */
+        @Override
         public int hashCode()
         {
             int result = sessionId;
@@ -280,6 +321,10 @@ public class BacklogStat
             return result;
         }
 
+        /**
+         * {@inheritDoc}
+         */
+        @Override
         public String toString()
         {
             return "StreamCompositeKey{" +
@@ -293,7 +338,7 @@ public class BacklogStat
     /**
      * Represents the backlog information for a particular stream of messages.
      */
-    public static class StreamBacklog
+    public static final class StreamBacklog
     {
         private Publisher publisher;
         private Sender sender;

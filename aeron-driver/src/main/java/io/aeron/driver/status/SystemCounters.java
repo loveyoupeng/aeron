@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package io.aeron.driver.status;
 
+import org.agrona.CloseHelper;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.agrona.concurrent.status.CountersManager;
 
@@ -23,7 +24,7 @@ import java.util.EnumMap;
 /**
  * Aggregate entry point for managing counters of system status.
  */
-public class SystemCounters implements AutoCloseable
+public final class SystemCounters implements AutoCloseable
 {
     private final EnumMap<SystemCounterDescriptor, AtomicCounter> counterByDescriptorMap =
         new EnumMap<>(SystemCounterDescriptor.class);
@@ -57,9 +58,17 @@ public class SystemCounters implements AutoCloseable
      */
     public void close()
     {
-        for (final AtomicCounter counter : counterByDescriptorMap.values())
-        {
-            counter.close();
-        }
+        CloseHelper.closeAll(counterByDescriptorMap.values());
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "SystemCounters{" +
+            "counterByDescriptorMap=" + counterByDescriptorMap +
+            '}';
     }
 }

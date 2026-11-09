@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@ package io.aeron.cluster.service;
 import io.aeron.DirectBufferVector;
 import io.aeron.Publication;
 import io.aeron.cluster.client.AeronCluster;
+import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.*;
-import io.aeron.exceptions.AeronException;
 import io.aeron.logbuffer.BufferClaim;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
@@ -27,12 +27,10 @@ import org.agrona.DirectBuffer;
 /**
  * Proxy for communicating with the Consensus Module over IPC.
  * <p>
- * This class is not for public use.
+ * <b>Note: </b>This class is not for public use.
  */
 public final class ConsensusModuleProxy implements AutoCloseable
 {
-    private static final int SEND_ATTEMPTS = 3;
-
     private final BufferClaim bufferClaim = new BufferClaim();
     private final MessageHeaderEncoder messageHeaderEncoder = new MessageHeaderEncoder();
     private final ScheduleTimerEncoder scheduleTimerEncoder = new ScheduleTimerEncoder();
@@ -40,73 +38,69 @@ public final class ConsensusModuleProxy implements AutoCloseable
     private final ServiceAckEncoder serviceAckEncoder = new ServiceAckEncoder();
     private final CloseSessionEncoder closeSessionEncoder = new CloseSessionEncoder();
     private final ClusterMembersQueryEncoder clusterMembersQueryEncoder = new ClusterMembersQueryEncoder();
-    private final RemoveMemberEncoder removeMemberEncoder = new RemoveMemberEncoder();
     private final Publication publication;
 
+    /**
+     * Construct a proxy to the consensus module that will send messages over a provided {@link Publication}.
+     *
+     * @param publication for sending messages to the consensus module.
+     */
     public ConsensusModuleProxy(final Publication publication)
     {
         this.publication = publication;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void close()
     {
         CloseHelper.close(publication);
     }
 
-    public boolean scheduleTimer(final long correlationId, final long deadlineMs)
+    boolean scheduleTimer(final long correlationId, final long deadline)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ScheduleTimerEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS;
-        do
+        final long position = publication.tryClaim(length, bufferClaim);
+        if (position > 0)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
-            {
-                scheduleTimerEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .correlationId(correlationId)
-                    .deadline(deadlineMs);
+            scheduleTimerEncoder
+                .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
+                .correlationId(correlationId)
+                .deadline(deadline);
 
-                bufferClaim.commit();
+            bufferClaim.commit();
 
-                return true;
-            }
-
-            checkResult(result);
+            return true;
         }
-        while (--attempts > 0);
+
+        checkResult(position, publication);
 
         return false;
     }
 
-    public boolean cancelTimer(final long correlationId)
+    boolean cancelTimer(final long correlationId)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + CancelTimerEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS;
-        do
+        final long position = publication.tryClaim(length, bufferClaim);
+        if (position > 0)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
-            {
-                cancelTimerEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .correlationId(correlationId);
+            cancelTimerEncoder
+                .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
+                .correlationId(correlationId);
 
-                bufferClaim.commit();
+            bufferClaim.commit();
 
-                return true;
-            }
-
-            checkResult(result);
+            return true;
         }
-        while (--attempts > 0);
+
+        checkResult(position, publication);
 
         return false;
     }
 
-    public long offer(
+    long offer(
         final DirectBuffer headerBuffer,
         final int headerOffset,
         final int headerLength,
@@ -114,144 +108,129 @@ public final class ConsensusModuleProxy implements AutoCloseable
         final int messageOffset,
         final int messageLength)
     {
-        return publication.offer(headerBuffer, headerOffset, headerLength, messageBuffer, messageOffset, messageLength);
+        final long position = publication.offer(
+            headerBuffer, headerOffset, headerLength, messageBuffer, messageOffset, messageLength);
+        if (position < 0)
+        {
+            checkResult(position, publication);
+        }
+
+        return position;
     }
 
-    public long offer(final DirectBufferVector[] vectors)
+    long offer(final DirectBufferVector[] vectors)
     {
-        return publication.offer(vectors, null);
+        final long position = publication.offer(vectors, null);
+        if (position < 0)
+        {
+            checkResult(position, publication);
+        }
+
+        return position;
     }
 
-    public long tryClaim(final int length, final BufferClaim bufferClaim, final DirectBuffer sessionHeader)
+    long tryClaim(final int length, final BufferClaim bufferClaim, final DirectBuffer sessionHeader)
     {
-        final long result = publication.tryClaim(length, bufferClaim);
-        if (result > 0)
+        final long position = publication.tryClaim(length, bufferClaim);
+        if (position > 0)
         {
             bufferClaim.putBytes(sessionHeader, 0, AeronCluster.SESSION_HEADER_LENGTH);
         }
+        else
+        {
+            checkResult(position, publication);
+        }
 
-        return result;
+        return position;
     }
 
-    public boolean ack(
+    boolean ack(
         final long logPosition, final long timestamp, final long ackId, final long relevantId, final int serviceId)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ServiceAckEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS;
-        do
+        final long position = publication.tryClaim(length, bufferClaim);
+        if (position > 0)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
-            {
-                serviceAckEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .logPosition(logPosition)
-                    .timestamp(timestamp)
-                    .ackId(ackId)
-                    .relevantId(relevantId)
-                    .serviceId(serviceId);
+            serviceAckEncoder
+                .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
+                .logPosition(logPosition)
+                .timestamp(timestamp)
+                .ackId(ackId)
+                .relevantId(relevantId)
+                .serviceId(serviceId);
 
-                bufferClaim.commit();
+            bufferClaim.commit();
 
-                return true;
-            }
-
-            checkResult(result);
+            return true;
         }
-        while (--attempts > 0);
+
+        checkResult(position, publication);
 
         return false;
     }
 
-    public boolean closeSession(final long clusterSessionId)
+    boolean closeSession(final long clusterSessionId)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + CloseSessionEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS;
-        do
+        final long position = publication.tryClaim(length, bufferClaim);
+        if (position > 0)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
-            {
-                closeSessionEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .clusterSessionId(clusterSessionId);
+            closeSessionEncoder
+                .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
+                .clusterSessionId(clusterSessionId);
 
-                bufferClaim.commit();
+            bufferClaim.commit();
 
-                return true;
-            }
-
-            checkResult(result);
+            return true;
         }
-        while (--attempts > 0);
+
+        checkResult(position, publication);
 
         return false;
     }
 
+    /**
+     * Query for the current cluster members.
+     *
+     * @param correlationId for the request.
+     * @return true of the request was successfully sent, otherwise false.
+     */
     public boolean clusterMembersQuery(final long correlationId)
     {
         final int length = MessageHeaderEncoder.ENCODED_LENGTH + ClusterMembersQueryEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS;
-        do
+        final long position = publication.tryClaim(length, bufferClaim);
+        if (position > 0)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
-            {
-                clusterMembersQueryEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .correlationId(correlationId)
-                    .extended(BooleanType.TRUE);
+            clusterMembersQueryEncoder
+                .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
+                .correlationId(correlationId)
+                .extended(BooleanType.TRUE);
 
-                bufferClaim.commit();
+            bufferClaim.commit();
 
-                return true;
-            }
-
-            checkResult(result);
+            return true;
         }
-        while (--attempts > 0);
+
+        checkResult(position, publication);
 
         return false;
     }
 
-    public boolean removeMember(final long correlationId, final int memberId, final BooleanType isPassive)
+    private static void checkResult(final long position, final Publication publication)
     {
-        final int length = MessageHeaderEncoder.ENCODED_LENGTH + RemoveMemberEncoder.BLOCK_LENGTH;
-
-        int attempts = SEND_ATTEMPTS;
-        do
+        if (Publication.NOT_CONNECTED == position)
         {
-            final long result = publication.tryClaim(length, bufferClaim);
-            if (result > 0)
-            {
-                removeMemberEncoder
-                    .wrapAndApplyHeader(bufferClaim.buffer(), bufferClaim.offset(), messageHeaderEncoder)
-                    .correlationId(correlationId)
-                    .memberId(memberId)
-                    .isPassive(isPassive);
-
-                bufferClaim.commit();
-
-                return true;
-            }
-
-            checkResult(result);
+            throw new ClusterException("publication is not connected");
         }
-        while (--attempts > 0);
 
-        return false;
-    }
-
-    private static void checkResult(final long result)
-    {
-        if (result == Publication.NOT_CONNECTED ||
-            result == Publication.CLOSED ||
-            result == Publication.MAX_POSITION_EXCEEDED)
+        if (Publication.CLOSED == position)
         {
-            throw new AeronException("unexpected publication state: " + result);
+            throw new ClusterException("publication is closed");
+        }
+
+        if (Publication.MAX_POSITION_EXCEEDED == position)
+        {
+            throw new ClusterException("publication at max position: term-length=" + publication.termBufferLength());
         }
     }
 }

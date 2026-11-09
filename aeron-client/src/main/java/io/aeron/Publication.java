@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,23 @@
 package io.aeron;
 
 import io.aeron.exceptions.AeronException;
-import io.aeron.logbuffer.*;
+import io.aeron.logbuffer.BufferClaim;
+import io.aeron.logbuffer.FrameDescriptor;
+import io.aeron.logbuffer.HeaderWriter;
+import io.aeron.logbuffer.LogBufferDescriptor;
 import io.aeron.status.ChannelEndpointStatus;
+import io.aeron.status.LocalSocketAddressStatus;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.ReadablePosition;
 
+import java.util.List;
+
+import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static io.aeron.logbuffer.LogBufferDescriptor.*;
 import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
+import static org.agrona.BitUtil.SIZE_OF_LONG;
+import static org.agrona.BitUtil.align;
 
 /**
  * Aeron publisher API for sending messages to subscribers of a given channel and streamId pair. {@link Publication}s
@@ -32,7 +41,7 @@ import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
  * <p>
  * The APIs used for tryClaim and offer are non-blocking.
  * <p>
- * <b>Note:</b> All methods are threadsafe with the exception of offer and tryClaim for the subclass
+ * <b>Note:</b> All methods are threadsafe except offer and tryClaim for the subclass
  * {@link ExclusivePublication}. In the case of {@link ConcurrentPublication} all methods are threadsafe.
  *
  * @see ConcurrentPublication
@@ -72,27 +81,30 @@ public abstract class Publication implements AutoCloseable
      */
     public static final long MAX_POSITION_EXCEEDED = -5;
 
-    protected final long originalRegistrationId;
-    protected final long registrationId;
-    protected final long maxPossiblePosition;
-    protected final int channelStatusId;
-    protected final int streamId;
-    protected final int sessionId;
-    protected final int maxMessageLength;
-    protected final int initialTermId;
-    protected final int maxPayloadLength;
-    protected final int positionBitsToShift;
-    protected final int termBufferLength;
-    protected volatile boolean isClosed = false;
+    final long originalRegistrationId;
+    final long registrationId;
+    final long maxPossiblePosition;
+    final int channelStatusId;
+    final int streamId;
+    final int sessionId;
+    final int maxMessageLength;
+    final int maxFramedLength;
+    final int initialTermId;
+    final int maxPayloadLength;
+    final int positionBitsToShift;
+    final int termBufferLength;
+    volatile boolean isClosed = false;
+    boolean revokeOnClose = false;
 
-    protected final ReadablePosition positionLimit;
-    protected final UnsafeBuffer logMetaDataBuffer;
-    protected final HeaderWriter headerWriter;
-    protected final LogBuffers logBuffers;
-    protected final ClientConductor conductor;
-    protected final String channel;
+    final ReadablePosition positionLimit;
+    final UnsafeBuffer[] termBuffers;
+    final UnsafeBuffer logMetaDataBuffer;
+    final HeaderWriter headerWriter;
+    final LogBuffers logBuffers;
+    final ClientConductor conductor;
+    final String channel;
 
-    protected Publication(
+    Publication(
         final ClientConductor clientConductor,
         final String channel,
         final int streamId,
@@ -107,20 +119,28 @@ public abstract class Publication implements AutoCloseable
         this.termBufferLength = logBuffers.termLength();
         this.maxMessageLength = FrameDescriptor.computeMaxMessageLength(termBufferLength);
         this.maxPayloadLength = LogBufferDescriptor.mtuLength(logMetaDataBuffer) - HEADER_LENGTH;
-        this.maxPossiblePosition = termBufferLength * (1L << 31L);
+        this.maxFramedLength = computeFragmentedFrameLength(maxMessageLength, maxPayloadLength);
+        this.maxPossiblePosition = termBufferLength * (1L << 31);
         this.conductor = clientConductor;
         this.channel = channel;
         this.streamId = streamId;
         this.sessionId = sessionId;
         this.initialTermId = LogBufferDescriptor.initialTermId(logMetaDataBuffer);
+        this.termBuffers = logBuffers.duplicateTermBuffers();
         this.logMetaDataBuffer = logMetaDataBuffer;
+        this.logBuffers = logBuffers;
         this.originalRegistrationId = originalRegistrationId;
         this.registrationId = registrationId;
         this.positionLimit = positionLimit;
         this.channelStatusId = channelStatusId;
-        this.logBuffers = logBuffers;
         this.positionBitsToShift = LogBufferDescriptor.positionBitsToShift(termBufferLength);
         this.headerWriter = HeaderWriter.newInstance(defaultFrameHeader(logMetaDataBuffer));
+
+        for (int i = 0; i < PARTITION_COUNT; i++)
+        {
+            final int tailCounterOffset = TERM_TAIL_COUNTERS_OFFSET + (i * SIZE_OF_LONG);
+            logMetaDataBuffer.boundsCheck(tailCounterOffset, SIZE_OF_LONG);
+        }
     }
 
     /**
@@ -211,7 +231,7 @@ public abstract class Publication implements AutoCloseable
     /**
      * Maximum length of a message payload that fits within a message fragment.
      * <p>
-     * This is he MTU length minus the message fragment header length.
+     * This is the MTU length minus the message fragment header length.
      *
      * @return maximum message fragment payload length.
      */
@@ -264,7 +284,7 @@ public abstract class Publication implements AutoCloseable
     }
 
     /**
-     * Release resources used by this Publication when there are no more references.
+     * Remove resources used by this Publication when there are no more references.
      * <p>
      * Publications are reference counted and are only truly closed when the ref count reaches zero.
      */
@@ -272,7 +292,7 @@ public abstract class Publication implements AutoCloseable
     {
         if (!isClosed)
         {
-            conductor.releasePublication(this);
+            conductor.removePublication(this);
         }
     }
 
@@ -314,6 +334,29 @@ public abstract class Publication implements AutoCloseable
     public int channelStatusId()
     {
         return channelStatusId;
+    }
+
+    /**
+     * Fetches the local socket address for this publication. If the channel is not
+     * {@link io.aeron.status.ChannelEndpointStatus#ACTIVE}, then this will return an empty list.
+     * <p>
+     * The format is as follows:
+     * <br>
+     * <br>
+     * IPv4: <code>ip address:port</code>
+     * <br>
+     * IPv6: <code>[ip6 address]:port</code>
+     * <br>
+     * <br>
+     * This is to match the formatting used in the Aeron URI. For publications this will be the control address and
+     * is likely to only contain a single entry.
+     *
+     * @return local socket addresses for this publication.
+     * @see #channelStatus()
+     */
+    public List<String> localSocketAddresses()
+    {
+        return LocalSocketAddressStatus.findAddresses(conductor.countersReader(), channelStatus(), channelStatusId);
     }
 
     /**
@@ -364,7 +407,7 @@ public abstract class Publication implements AutoCloseable
     /**
      * Available window for offering into a publication before the {@link #positionLimit()} is reached.
      *
-     * @return  window for offering into a publication before the {@link #positionLimit()} is reached. If
+     * @return window for offering into a publication before the {@link #positionLimit()} is reached. If
      * the publication is closed then {@link #CLOSED} will be returned.
      */
     public abstract long availableWindow();
@@ -503,7 +546,7 @@ public abstract class Publication implements AutoCloseable
      *     }
      * }</pre>
      *
-     * @param length      of the range to claim, in bytes..
+     * @param length      of the range to claim, in bytes.
      * @param bufferClaim to be populated if the claim succeeds.
      * @return The new stream position, otherwise a negative error value of {@link #NOT_CONNECTED},
      * {@link #BACK_PRESSURED}, {@link #ADMIN_ACTION}, {@link #CLOSED}, or {@link #MAX_POSITION_EXCEEDED}.
@@ -544,6 +587,21 @@ public abstract class Publication implements AutoCloseable
     }
 
     /**
+     * Remove a previously added destination manually from a multi-destination-cast Publication.
+     *
+     * @param registrationId for the destination to remove.
+     */
+    public void removeDestination(final long registrationId)
+    {
+        if (isClosed)
+        {
+            throw new AeronException("Publication is closed");
+        }
+
+        conductor.removeDestination(originalRegistrationId, registrationId);
+    }
+
+    /**
      * Asynchronously add a destination manually to a multi-destination-cast Publication.
      * <p>
      * Errors will be delivered asynchronously to the {@link Aeron.Context#errorHandler()}. Completion can be
@@ -581,6 +639,25 @@ public abstract class Publication implements AutoCloseable
         return conductor.asyncRemoveDestination(registrationId, endpointChannel);
     }
 
+    /**
+     * Asynchronously remove a previously added destination from a multi-destination-cast Publication by registrationId.
+     * <p>
+     * Errors will be delivered asynchronously to the {@link Aeron.Context#errorHandler()}. Completion can be
+     * tracked by passing the returned correlation id to {@link Aeron#isCommandActive(long)}.
+     *
+     * @param destinationRegistrationId for the destination to remove.
+     * @return the correlationId for the command.
+     */
+    public long asyncRemoveDestination(final long destinationRegistrationId)
+    {
+        if (isClosed)
+        {
+            throw new AeronException("Publication is closed");
+        }
+
+        return conductor.asyncRemoveDestination(registrationId, destinationRegistrationId);
+    }
+
     void internalClose()
     {
         isClosed = true;
@@ -593,7 +670,7 @@ public abstract class Publication implements AutoCloseable
 
     final long backPressureStatus(final long currentPosition, final int messageLength)
     {
-        if ((currentPosition + messageLength) >= maxPossiblePosition)
+        if ((currentPosition + align(messageLength + HEADER_LENGTH, FRAME_ALIGNMENT)) >= maxPossiblePosition)
         {
             return MAX_POSITION_EXCEEDED;
         }
@@ -658,12 +735,56 @@ public abstract class Publication implements AutoCloseable
         return totalLength;
     }
 
+    /**
+     * Returns a string representation of a position. Generally used for errors. If the position is a valid error then
+     * String name of the error will be returned. If the value is 0 or greater the text will be "NONE". If the position
+     * is negative, but not a known error code then "UNKNOWN" will be returned.
+     *
+     * @param position position value returned from a call to offer.
+     * @return String representation of the error.
+     */
+    public static String errorString(final long position)
+    {
+        if (MAX_POSITION_EXCEEDED <= position && position < 0)
+        {
+            final int errorCode = (int)position;
+            switch (errorCode)
+            {
+                case (int)NOT_CONNECTED:
+                    return "NOT_CONNECTED";
+                case (int)BACK_PRESSURED:
+                    return "BACK_PRESSURED";
+                case (int)ADMIN_ACTION:
+                    return "ADMIN_ACTION";
+                case (int)CLOSED:
+                    return "CLOSED";
+                case (int)MAX_POSITION_EXCEEDED:
+                    return "MAX_POSITION_EXCEEDED";
+                default:
+                    return "UNKNOWN";
+            }
+        }
+        else if (0 <= position)
+        {
+            return "NONE";
+        }
+        else
+        {
+            return "UNKNOWN";
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String toString()
     {
         return "Publication{" +
             "originalRegistrationId=" + originalRegistrationId +
             ", registrationId=" + registrationId +
             ", isClosed=" + isClosed +
+            ", isConnected=" + isConnected() +
             ", initialTermId=" + initialTermId +
             ", termBufferLength=" + termBufferLength +
             ", sessionId=" + sessionId +

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ public:
 
     static int propertyHandler(void *clientd, const char *name, const char *value)
     {
-        auto test = reinterpret_cast<DriverConfigurationTest*>(clientd);
+        auto test = reinterpret_cast<DriverConfigurationTest *>(clientd);
 
         test->m_name = std::string(name);
         test->m_value = std::string(value);
@@ -54,7 +54,7 @@ public:
 
 
 protected:
-    aeron_properties_parser_state_t m_state;
+    aeron_properties_parser_state_t m_state = {};
     std::string m_name;
     std::string m_value;
 };
@@ -171,9 +171,14 @@ TEST_F(DriverConfigurationTest, shouldParseContinuationWithBlankLine)
     EXPECT_EQ(m_value, "propertyValue");
 }
 
+TEST_F(DriverConfigurationTest, shouldIgnoreMissingPropertiesFile)
+{
+    EXPECT_EQ(aeron_properties_file_load("/tmp/aeron-nonexistent-properties-file.properties"), 0);
+}
+
 TEST_F(DriverConfigurationTest, DISABLED_shouldHttpRetrieve)
 {
-    aeron_http_response_t *response = NULL;
+    aeron_http_response_t *response = nullptr;
     int result = aeron_http_retrieve(&response, "http://localhost:8000/aeron-throughput.properties", -1L);
 
     if (-1 == result)

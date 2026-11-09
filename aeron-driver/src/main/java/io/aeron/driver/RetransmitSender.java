@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,17 +16,17 @@
 package io.aeron.driver;
 
 /**
- * Handler for sending a retransmit
+ * Handler for sending a retransmit.
  */
 @FunctionalInterface
 public interface RetransmitSender
 {
     /**
-     * Called when a retransmit should be sent.
+     * Called when a frame should be sent to request the retransmission of data.
      *
-     * @param termId     for the NAK
-     * @param termOffset for the NAK
-     * @param length     for the NAK
+     * @param termId     containing the data to NAK.
+     * @param termOffset of the data to NAK.
+     * @param length     of the data to NAK.
      */
     void resend(int termId, int termOffset, int length);
 }

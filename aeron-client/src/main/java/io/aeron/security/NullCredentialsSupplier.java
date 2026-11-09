@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,13 +22,31 @@ import org.agrona.collections.ArrayUtil;
  */
 public class NullCredentialsSupplier implements CredentialsSupplier
 {
+    /**
+     * Default constructor.
+     */
+    public NullCredentialsSupplier()
+    {
+    }
+
+    /**
+     * Null credentials are an empty array of bytes.
+     */
     public static final byte[] NULL_CREDENTIAL = ArrayUtil.EMPTY_BYTE_ARRAY;
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public byte[] encodedCredentials()
     {
         return NULL_CREDENTIAL;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public byte[] onChallenge(final byte[] encodedChallenge)
     {
         return NULL_CREDENTIAL;

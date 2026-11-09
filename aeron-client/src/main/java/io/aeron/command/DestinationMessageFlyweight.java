@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@
  */
 package io.aeron.command;
 
-import io.aeron.ErrorCode;
 import io.aeron.exceptions.ControlProtocolException;
+import org.agrona.MutableDirectBuffer;
 
+import static io.aeron.ErrorCode.MALFORMED_COMMAND;
 import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
@@ -53,9 +54,32 @@ public class DestinationMessageFlyweight extends CorrelatedMessageFlyweight
     private int lengthOfChannel;
 
     /**
-     * return correlation id used in registration field
+     * An empty flyweight, which should be wrapped over a buffer.
      *
-     * @return correlation id field
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public DestinationMessageFlyweight()
+    {
+    }
+
+    /**
+     * Wrap the buffer at a given offset for updates.
+     *
+     * @param buffer to wrap.
+     * @param offset at which the message begins.
+     * @return this for a fluent API.
+     */
+    public DestinationMessageFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
+    {
+        super.wrap(buffer, offset);
+
+        return this;
+    }
+
+    /**
+     * return correlation id used in registration field.
+     *
+     * @return correlation id field.
      */
     public long registrationCorrelationId()
     {
@@ -63,10 +87,10 @@ public class DestinationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * set registration correlation id field
+     * set registration correlation id field.
      *
-     * @param correlationId field value
-     * @return flyweight
+     * @param correlationId field value.
+     * @return this for a fluent API.
      */
     public DestinationMessageFlyweight registrationCorrelationId(final long correlationId)
     {
@@ -76,9 +100,9 @@ public class DestinationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Get the channel field in ASCII
+     * Get the channel field in ASCII.
      *
-     * @return channel field
+     * @return channel field.
      */
     public String channel()
     {
@@ -96,10 +120,10 @@ public class DestinationMessageFlyweight extends CorrelatedMessageFlyweight
     }
 
     /**
-     * Set channel field in ASCII
+     * Set channel field in ASCII.
      *
      * @param channel field value
-     * @return flyweight
+     * @return this for a fluent API.
      */
     public DestinationMessageFlyweight channel(final String channel)
     {
@@ -108,6 +132,11 @@ public class DestinationMessageFlyweight extends CorrelatedMessageFlyweight
         return this;
     }
 
+    /**
+     * Length of the frame in bytes.
+     *
+     * @return length of the frame in bytes.
+     */
     public int length()
     {
         return CHANNEL_OFFSET + lengthOfChannel;
@@ -124,13 +153,24 @@ public class DestinationMessageFlyweight extends CorrelatedMessageFlyweight
         if (length < MINIMUM_LENGTH)
         {
             throw new ControlProtocolException(
-                ErrorCode.MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
+                MALFORMED_COMMAND, "command=" + msgTypeId + " too short: length=" + length);
         }
 
         if ((length - MINIMUM_LENGTH) < buffer.getInt(offset + CHANNEL_OFFSET))
         {
             throw new ControlProtocolException(
-                ErrorCode.MALFORMED_COMMAND, "command=" + msgTypeId + " too short for channel: length=" + length);
+                MALFORMED_COMMAND, "command=" + msgTypeId + " too short for channel: length=" + length);
         }
+    }
+
+    /**
+     * Compute the length of the command message for a given channel length.
+     *
+     * @param channelLength to be appended to the header.
+     * @return the length of the command message for a given channel length.
+     */
+    public static int computeLength(final int channelLength)
+    {
+        return MINIMUM_LENGTH + channelLength;
     }
 }

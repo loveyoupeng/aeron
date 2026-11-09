@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.aeron.driver.MediaDriver;
 import io.aeron.driver.ThreadingMode;
+import io.aeron.logbuffer.*;
 import org.HdrHistogram.Histogram;
 
 import io.aeron.Aeron;
@@ -28,8 +29,6 @@ import io.aeron.FragmentAssembler;
 import io.aeron.Image;
 import io.aeron.Publication;
 import io.aeron.Subscription;
-import io.aeron.logbuffer.FragmentHandler;
-import io.aeron.logbuffer.Header;
 import org.agrona.BitUtil;
 import org.agrona.BufferUtil;
 import org.agrona.DirectBuffer;
@@ -63,7 +62,13 @@ public class EmbeddedPingPong
     private static final IdleStrategy PONG_HANDLER_IDLE_STRATEGY = SampleConfiguration.newIdleStrategy();
     private static final AtomicBoolean RUNNING = new AtomicBoolean(true);
 
-    public static void main(final String[] args) throws Exception
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws InterruptedException if the thread is interrupted.
+     */
+    public static void main(final String[] args) throws InterruptedException
     {
         loadPropertiesFiles(args);
 
@@ -73,8 +78,8 @@ public class EmbeddedPingPong
             .receiverIdleStrategy(NoOpIdleStrategy.INSTANCE)
             .senderIdleStrategy(NoOpIdleStrategy.INSTANCE);
 
-        try (MediaDriver ignored = MediaDriver.launch(ctx);
-            Aeron aeron = Aeron.connect())
+        try (MediaDriver mediaDriver = MediaDriver.launch(ctx);
+            Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(mediaDriver.aeronDirectoryName())))
         {
             final Thread pongThread = startPong(aeron);
             pongThread.start();
@@ -143,12 +148,13 @@ public class EmbeddedPingPong
                     aeron.addExclusivePublication(PONG_CHANNEL, PONG_STREAM_ID) :
                     aeron.addPublication(PONG_CHANNEL, PONG_STREAM_ID))
             {
-                final FragmentAssembler dataHandler = new FragmentAssembler(
-                    (buffer, offset, length, header) -> pingHandler(pongPublication, buffer, offset, length));
+                final BufferClaim bufferClaim = new BufferClaim();
+                final FragmentHandler fragmentHandler = (buffer, offset, length, header) ->
+                    pingHandler(bufferClaim, pongPublication, buffer, offset, length, header);
 
                 while (RUNNING.get())
                 {
-                    PING_HANDLER_IDLE_STRATEGY.idle(pingSubscription.poll(dataHandler, FRAME_COUNT_LIMIT));
+                    PING_HANDLER_IDLE_STRATEGY.idle(pingSubscription.poll(fragmentHandler, FRAME_COUNT_LIMIT));
                 }
 
                 System.out.println("Shutting down...");
@@ -177,21 +183,16 @@ public class EmbeddedPingPong
             {
                 OFFER_BUFFER.putLong(0, System.nanoTime());
             }
-            while ((offeredPosition = pingPublication.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH)) < 0L);
+            while ((offeredPosition = pingPublication.offer(OFFER_BUFFER, 0, MESSAGE_LENGTH, null)) < 0L);
 
-            PONG_HANDLER_IDLE_STRATEGY.reset();
-            do
+            while (image.position() < offeredPosition)
             {
-                while (image.poll(fragmentHandler, FRAGMENT_COUNT_LIMIT) <= 0)
-                {
-                    PONG_HANDLER_IDLE_STRATEGY.idle();
-                }
+                final int fragments = image.poll(fragmentHandler, FRAGMENT_COUNT_LIMIT);
+                PONG_HANDLER_IDLE_STRATEGY.idle(fragments);
             }
-            while (image.position() < offeredPosition);
         }
     }
 
-    @SuppressWarnings("unused")
     private static void pongHandler(final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
         final long pingTimestamp = buffer.getLong(offset);
@@ -209,19 +210,23 @@ public class EmbeddedPingPong
         }
     }
 
-    public static void pingHandler(
-        final Publication pongPublication, final DirectBuffer buffer, final int offset, final int length)
+    static void pingHandler(
+        final BufferClaim bufferClaim,
+        final Publication pongPublication,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length,
+        final Header header)
     {
-        if (pongPublication.offer(buffer, offset, length) > 0L)
-        {
-            return;
-        }
-
         PING_HANDLER_IDLE_STRATEGY.reset();
-
-        while (pongPublication.offer(buffer, offset, length) < 0L)
+        while (pongPublication.tryClaim(length, bufferClaim) <= 0)
         {
             PING_HANDLER_IDLE_STRATEGY.idle();
         }
+
+        bufferClaim
+            .flags(header.flags())
+            .putBytes(buffer, offset, length)
+            .commit();
     }
 }

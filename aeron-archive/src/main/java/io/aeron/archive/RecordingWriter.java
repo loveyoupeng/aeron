@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,13 +16,16 @@
 package io.aeron.archive;
 
 import io.aeron.Image;
-import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.checksum.Checksum;
 import io.aeron.archive.client.ArchiveException;
+import io.aeron.exceptions.StorageSpaceException;
 import io.aeron.logbuffer.BlockHandler;
-import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
 import org.agrona.LangUtil;
+import org.agrona.concurrent.CountedErrorHandler;
+import org.agrona.concurrent.NanoClock;
+import org.agrona.concurrent.UnsafeBuffer;
 
 import java.io.File;
 import java.io.IOException;
@@ -31,8 +34,10 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 
-import static io.aeron.logbuffer.FrameDescriptor.PADDING_FRAME_TYPE;
-import static io.aeron.logbuffer.FrameDescriptor.typeOffset;
+import static io.aeron.archive.client.AeronArchive.segmentFileBasePosition;
+import static io.aeron.logbuffer.FrameDescriptor.*;
+import static io.aeron.protocol.DataHeaderFlyweight.HEADER_LENGTH;
+import static org.agrona.BitUtil.align;
 
 /**
  * Responsible for writing out a recording into the file system. A recording has descriptor file and a set of data files
@@ -45,16 +50,23 @@ import static io.aeron.logbuffer.FrameDescriptor.typeOffset;
  * <li>Isolation of an external relationship, namely the file system.</li>
  * </ul>
  */
-class RecordingWriter implements BlockHandler
+final class RecordingWriter implements BlockHandler, AutoCloseable
 {
     private final long recordingId;
     private final int segmentLength;
     private final boolean forceWrites;
     private final boolean forceMetadata;
+    private final UnsafeBuffer checksumBuffer;
+    private final Checksum checksum;
     private final FileChannel archiveDirChannel;
     private final File archiveDir;
+    private final CountedErrorHandler countedErrorHandler;
+    private final NanoClock nanoClock;
+    private final Archive.Context ctx;
 
-    private long segmentPosition;
+    private final ArchiveConductor.Recorder recorder;
+
+    private long segmentBasePosition;
     private int segmentOffset;
     private FileChannel recordingFileChannel;
 
@@ -66,36 +78,60 @@ class RecordingWriter implements BlockHandler
         final int segmentLength,
         final Image image,
         final Archive.Context ctx,
-        final FileChannel archiveDirChannel)
+        final ArchiveConductor.Recorder recorder)
     {
         this.recordingId = recordingId;
-        this.archiveDirChannel = archiveDirChannel;
+        this.archiveDirChannel = ctx.archiveDirChannel();
         this.segmentLength = segmentLength;
 
         archiveDir = ctx.archiveDir();
         forceWrites = ctx.fileSyncLevel() > 0;
         forceMetadata = ctx.fileSyncLevel() > 1;
 
+        countedErrorHandler = ctx.countedErrorHandler();
+        checksumBuffer = ctx.recordChecksumBuffer();
+        checksum = ctx.recordChecksum();
+        nanoClock = ctx.nanoClock();
+        this.ctx = ctx;
+        this.recorder = recorder;
+
         final int termLength = image.termBufferLength();
         final long joinPosition = image.joinPosition();
-        final long startTermBasePosition = startPosition - (startPosition & (termLength - 1));
-        segmentOffset = (int)((joinPosition - startTermBasePosition) & (segmentLength - 1));
-        segmentPosition = AeronArchive.segmentFileBasePosition(startPosition, joinPosition, termLength, segmentLength);
+        segmentBasePosition = segmentFileBasePosition(startPosition, joinPosition, termLength, segmentLength);
+        segmentOffset = (int)(joinPosition - segmentBasePosition);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onBlock(
         final DirectBuffer termBuffer, final int termOffset, final int length, final int sessionId, final int termId)
     {
         try
         {
             final boolean isPaddingFrame = termBuffer.getShort(typeOffset(termOffset)) == PADDING_FRAME_TYPE;
-            final int dataLength = isPaddingFrame ? DataHeaderFlyweight.HEADER_LENGTH : length;
-            final ByteBuffer byteBuffer = termBuffer.byteBuffer();
-            byteBuffer.limit(termOffset + dataLength).position(termOffset);
+            final int dataLength = isPaddingFrame ? HEADER_LENGTH : length;
+            final ByteBuffer byteBuffer;
 
+            final long startNs = nanoClock.nanoTime();
+            if (null == checksum || isPaddingFrame)
+            {
+                byteBuffer = termBuffer.byteBuffer();
+                byteBuffer.limit(termOffset + dataLength).position(termOffset);
+            }
+            else
+            {
+                checksumBuffer.putBytes(0, termBuffer, termOffset, dataLength);
+                computeChecksum(checksum, checksumBuffer, dataLength);
+                byteBuffer = checksumBuffer.byteBuffer();
+                byteBuffer.limit(dataLength).position(0);
+            }
+
+            int fileOffset = segmentOffset;
             do
             {
-                recordingFileChannel.write(byteBuffer);
+                fileOffset += recordingFileChannel.write(byteBuffer, fileOffset);
             }
             while (byteBuffer.remaining() > 0);
 
@@ -104,20 +140,25 @@ class RecordingWriter implements BlockHandler
                 recordingFileChannel.force(forceMetadata);
             }
 
+            final long writeTimeNs = nanoClock.nanoTime() - startNs;
+            recorder.bytesWritten(dataLength);
+            recorder.writeTimeNs(writeTimeNs);
+
             segmentOffset += length;
             if (segmentOffset >= segmentLength)
             {
                 onFileRollOver();
-            }
-            else if (isPaddingFrame)
-            {
-                recordingFileChannel.position(segmentOffset);
             }
         }
         catch (final ClosedByInterruptException ex)
         {
             close();
             throw new ArchiveException("file closed by interrupt, recording aborted", ex, ArchiveException.GENERIC);
+        }
+        catch (final IOException ex)
+        {
+            close();
+            checkErrorType(ex, length);
         }
         catch (final Exception ex)
         {
@@ -126,18 +167,27 @@ class RecordingWriter implements BlockHandler
         }
     }
 
-    void close()
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void close()
     {
         if (!isClosed)
         {
             isClosed = true;
-            CloseHelper.quietClose(recordingFileChannel);
+            CloseHelper.close(countedErrorHandler, recordingFileChannel);
         }
+    }
+
+    long position()
+    {
+        return segmentBasePosition + segmentOffset;
     }
 
     void init() throws IOException
     {
-        openRecordingSegmentFile();
+        openRecordingSegmentFile(new File(archiveDir, Archive.segmentFileName(recordingId, segmentBasePosition)));
 
         if (segmentOffset != 0)
         {
@@ -145,19 +195,27 @@ class RecordingWriter implements BlockHandler
         }
     }
 
-    boolean isClosed()
+    private void computeChecksum(final Checksum checksum, final UnsafeBuffer buffer, final int length)
     {
-        return isClosed;
+        final long address = buffer.addressOffset();
+        int frameOffset = 0;
+
+        while (frameOffset < length)
+        {
+            final int alignedLength = align(frameLength(buffer, frameOffset), FRAME_ALIGNMENT);
+            final int computedChecksum = checksum.compute(
+                address, frameOffset + HEADER_LENGTH, alignedLength - HEADER_LENGTH);
+            frameSessionId(buffer, frameOffset, computedChecksum);
+            frameOffset += alignedLength;
+        }
     }
 
-    private void openRecordingSegmentFile()
+    private void openRecordingSegmentFile(final File segmentFile)
     {
-        final File file = new File(archiveDir, Archive.segmentFileName(recordingId, segmentPosition));
-
         RandomAccessFile recordingFile = null;
         try
         {
-            recordingFile = new RandomAccessFile(file, "rw");
+            recordingFile = new RandomAccessFile(segmentFile, "rw");
             recordingFile.setLength(segmentLength);
             recordingFileChannel = recordingFile.getChannel();
             if (forceWrites && null != archiveDirChannel)
@@ -177,8 +235,40 @@ class RecordingWriter implements BlockHandler
     {
         CloseHelper.close(recordingFileChannel);
         segmentOffset = 0;
-        segmentPosition += segmentLength;
+        segmentBasePosition += segmentLength;
 
-        openRecordingSegmentFile();
+        final File file = new File(archiveDir, Archive.segmentFileName(recordingId, segmentBasePosition));
+        if (file.exists())
+        {
+            throw new ArchiveException("segment file already exists: " + file);
+        }
+
+        openRecordingSegmentFile(file);
+    }
+
+    private void checkErrorType(final IOException ex, final int writeLength)
+    {
+        boolean isLowStorageSpace = false;
+        IOException suppressed = null;
+
+        try
+        {
+            isLowStorageSpace = StorageSpaceException.isStorageSpaceError(ex) ||
+                ctx.archiveFileStore().getUsableSpace() < writeLength;
+        }
+        catch (final IOException ex2)
+        {
+            suppressed = ex2;
+        }
+
+        final int errorCode = isLowStorageSpace ? ArchiveException.STORAGE_SPACE : ArchiveException.GENERIC;
+        final ArchiveException error = new ArchiveException("java.io.IOException - " + ex.getMessage(), ex, errorCode);
+
+        if (null != suppressed)
+        {
+            error.addSuppressed(suppressed);
+        }
+
+        throw error;
     }
 }

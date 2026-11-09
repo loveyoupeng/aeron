@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ package io.aeron.security;
 
 /**
  * Supplier of credentials for authentication with a system.
- *
+ * <p>
  * Implement this interface to supply credentials for clients. If no credentials are required then the
  * {@link NullCredentialsSupplier} can be used.
  */

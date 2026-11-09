@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,51 +15,31 @@
  */
 package io.aeron.driver;
 
+import io.aeron.protocol.ErrorFlyweight;
 import io.aeron.protocol.StatusMessageFlyweight;
-import org.agrona.collections.ArrayListUtil;
 
 import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.concurrent.TimeUnit;
-
-import static io.aeron.logbuffer.LogBufferDescriptor.computePosition;
-import static org.agrona.SystemUtil.getDurationInNanos;
 
 /**
- * Minimum multicast sender flow control strategy.
- * <p>
- * Flow control is set to minimum of tracked receivers.
- * <p>
- * Tracking of receivers is done as long as they continue to send Status Messages. Once SMs stop, the receiver tracking
- * for that receiver will timeout after a given number of nanoseconds.
+ * Minimum multicast sender flow control strategy. Uses the {@link AbstractMinMulticastFlowControl}, but specifies that
+ * the group membership for a given receiver is always <code>true</code>, so it tracks the minimum for all receivers.
  */
-public class MinMulticastFlowControl implements FlowControl
+public class MinMulticastFlowControl extends AbstractMinMulticastFlowControl
 {
     /**
-     * Property name to set timeout, in nanoseconds, for a receiver to be tracked.
+     * URI param value to identify this {@link FlowControl} strategy.
      */
-    public static final String RECEIVER_TIMEOUT_PROP_NAME = "aeron.MinMulticastFlowControl.receiverTimeout";
+    public static final String FC_PARAM_VALUE = "min";
 
-    /**
-     * Default timeout, in nanoseconds, until a receiver is no longer tracked and considered for minimum.
-     */
-    public static final long RECEIVER_TIMEOUT_DEFAULT = TimeUnit.SECONDS.toNanos(2);
-
-    public static final long RECEIVER_TIMEOUT = getDurationInNanos(
-        RECEIVER_TIMEOUT_PROP_NAME, RECEIVER_TIMEOUT_DEFAULT);
-
-    private final ArrayList<Receiver> receiverList = new ArrayList<>();
-
-    /**
-     * {@inheritDoc}
-     */
-    public void initialize(final int initialTermId, final int termBufferLength)
+    MinMulticastFlowControl()
     {
+        super(false);
     }
 
     /**
      * {@inheritDoc}
      */
+    @Override
     public long onStatusMessage(
         final StatusMessageFlyweight flyweight,
         final InetSocketAddress receiverAddress,
@@ -68,89 +48,27 @@ public class MinMulticastFlowControl implements FlowControl
         final int positionBitsToShift,
         final long timeNs)
     {
-        final long position = computePosition(
-            flyweight.consumptionTermId(),
-            flyweight.consumptionTermOffset(),
-            positionBitsToShift,
-            initialTermId);
-
-        final long windowLength = flyweight.receiverWindowLength();
-        final long receiverId = flyweight.receiverId();
-        boolean isExisting = false;
-        long minPosition = Long.MAX_VALUE;
-
-        final ArrayList<Receiver> receiverList = this.receiverList;
-        for (int i = 0, size = receiverList.size(); i < size; i++)
-        {
-            final Receiver receiver = receiverList.get(i);
-
-            if (receiverId == receiver.receiverId)
-            {
-                receiver.lastPosition = Math.max(position, receiver.lastPosition);
-                receiver.lastPositionPlusWindow = position + windowLength;
-                receiver.timeOfLastStatusMessageNs = timeNs;
-                isExisting = true;
-            }
-
-            minPosition = Math.min(minPosition, receiver.lastPositionPlusWindow);
-        }
-
-        if (!isExisting)
-        {
-            receiverList.add(new Receiver(
-                position, position + windowLength, timeNs, receiverId, receiverAddress));
-            minPosition = Math.min(minPosition, position + windowLength);
-        }
-
-        return Math.max(senderLimit, minPosition);
+        return processStatusMessage(flyweight, senderLimit, initialTermId, positionBitsToShift, timeNs, true);
     }
 
     /**
      * {@inheritDoc}
      */
-    public long onIdle(final long timeNs, final long senderLimit, final long senderPosition, final boolean isEos)
+    @Override
+    public void onTriggerSendSetup(
+        final StatusMessageFlyweight flyweight,
+        final InetSocketAddress receiverAddress,
+        final long timeNs)
     {
-        long minPosition = Long.MAX_VALUE;
-        long minLimitPosition = Long.MAX_VALUE;
-        final ArrayList<Receiver> receiverList = this.receiverList;
-
-        for (int lastIndex = receiverList.size() - 1, i = lastIndex; i >= 0; i--)
-        {
-            final Receiver receiver = receiverList.get(i);
-            if ((receiver.timeOfLastStatusMessageNs + RECEIVER_TIMEOUT) - timeNs < 0)
-            {
-                ArrayListUtil.fastUnorderedRemove(receiverList, i, lastIndex--);
-            }
-            else
-            {
-                minPosition = Math.min(minPosition, receiver.lastPosition);
-                minLimitPosition = Math.min(minLimitPosition, receiver.lastPositionPlusWindow);
-            }
-        }
-
-        return receiverList.size() > 0 ? minLimitPosition : senderLimit;
+        processSendSetupTrigger(flyweight, receiverAddress, timeNs, true);
     }
 
-    static class Receiver
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public void onError(final ErrorFlyweight errorFlyweight, final InetSocketAddress receiverAddress, final long timeNs)
     {
-        long lastPosition;
-        long lastPositionPlusWindow;
-        long timeOfLastStatusMessageNs;
-        final long receiverId;
-        final InetSocketAddress address;
-
-        Receiver(
-            final long lastPosition,
-            final long lastPositionPlusWindow,
-            final long timeNs,
-            final long receiverId,
-            final InetSocketAddress receiverAddress)
-        {
-            this.lastPosition = lastPosition;
-            this.lastPositionPlusWindow = lastPositionPlusWindow;
-            this.timeOfLastStatusMessageNs = timeNs;
-            this.receiverId = receiverId;
-            this.address = receiverAddress;
-        }
+        processError(errorFlyweight, receiverAddress, timeNs, true);
     }
 }

@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,16 +17,18 @@ package io.aeron.cluster.client;
 
 import io.aeron.Aeron;
 import io.aeron.ControlledFragmentAssembler;
+import io.aeron.Image;
 import io.aeron.Subscription;
 import io.aeron.cluster.codecs.*;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
+import org.agrona.collections.ArrayUtil;
 
 /**
  * Poller for the egress from a cluster to capture administration message details.
  */
-public class EgressPoller implements ControlledFragmentHandler
+public final class EgressPoller implements ControlledFragmentHandler
 {
     private final int fragmentLimit;
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
@@ -36,17 +38,26 @@ public class EgressPoller implements ControlledFragmentHandler
     private final SessionMessageHeaderDecoder sessionMessageHeaderDecoder = new SessionMessageHeaderDecoder();
     private final ControlledFragmentAssembler fragmentAssembler = new ControlledFragmentAssembler(this);
     private final Subscription subscription;
+
+    private Image egressImage;
     private long clusterSessionId = Aeron.NULL_VALUE;
     private long correlationId = Aeron.NULL_VALUE;
     private long leadershipTermId = Aeron.NULL_VALUE;
     private int leaderMemberId = Aeron.NULL_VALUE;
     private int templateId = Aeron.NULL_VALUE;
     private int version = 0;
+    private long leaderHeartbeatTimeoutNs = Aeron.NULL_VALUE;
     private boolean isPollComplete = false;
     private EventCode eventCode;
     private String detail = "";
     private byte[] encodedChallenge;
 
+    /**
+     * Construct a poller on the egress subscription.
+     *
+     * @param subscription  for egress from the cluster.
+     * @param fragmentLimit for each poll operation.
+     */
     public EgressPoller(final Subscription subscription, final int fragmentLimit)
     {
         this.subscription = subscription;
@@ -61,6 +72,16 @@ public class EgressPoller implements ControlledFragmentHandler
     public Subscription subscription()
     {
         return subscription;
+    }
+
+    /**
+     * {@link Image} for the egress response from the cluster which can be used for connection tracking.
+     *
+     * @return {@link Image} for the egress response from the cluster which can be used for connection tracking.
+     */
+    public Image egressImage()
+    {
+        return egressImage;
     }
 
     /**
@@ -134,9 +155,19 @@ public class EgressPoller implements ControlledFragmentHandler
     }
 
     /**
-     * Get the detail returned in the last session event.
+     * Leader heartbeat timeout of the last polled event or {@link Aeron#NULL_VALUE} if not available.
      *
-     * @return the detail returned in the last session event.
+     * @return leader heartbeat timeout of the last polled event or {@link Aeron#NULL_VALUE} if not available.
+     */
+    public long leaderHeartbeatTimeoutNs()
+    {
+        return leaderHeartbeatTimeoutNs;
+    }
+
+    /**
+     * Get the detail returned from the last session event.
+     *
+     * @return the detail returned from the last session event.
      */
     public String detail()
     {
@@ -173,22 +204,35 @@ public class EgressPoller implements ControlledFragmentHandler
         return ChallengeDecoder.TEMPLATE_ID == templateId;
     }
 
+    /**
+     * Reset last captured value and poll the egress subscription for output.
+     *
+     * @return number of fragments consumed.
+     */
     public int poll()
     {
-        clusterSessionId = Aeron.NULL_VALUE;
-        correlationId = Aeron.NULL_VALUE;
-        leadershipTermId = Aeron.NULL_VALUE;
-        leaderMemberId = Aeron.NULL_VALUE;
-        templateId = Aeron.NULL_VALUE;
-        version = 0;
-        eventCode = null;
-        detail = "";
-        encodedChallenge = null;
-        isPollComplete = false;
+        if (isPollComplete)
+        {
+            isPollComplete = false;
+            clusterSessionId = Aeron.NULL_VALUE;
+            correlationId = Aeron.NULL_VALUE;
+            leadershipTermId = Aeron.NULL_VALUE;
+            leaderMemberId = Aeron.NULL_VALUE;
+            templateId = Aeron.NULL_VALUE;
+            version = 0;
+            leaderHeartbeatTimeoutNs = Aeron.NULL_VALUE;
+            eventCode = null;
+            detail = "";
+            encodedChallenge = null;
+        }
 
         return subscription.controlledPoll(fragmentAssembler, fragmentLimit);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public ControlledFragmentAssembler.Action onFragment(
         final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
@@ -202,7 +246,7 @@ public class EgressPoller implements ControlledFragmentHandler
         final int schemaId = messageHeaderDecoder.schemaId();
         if (schemaId != MessageHeaderDecoder.SCHEMA_ID)
         {
-            throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
+            return Action.CONTINUE; // skip unknown schemas
         }
 
         templateId = messageHeaderDecoder.templateId();
@@ -233,8 +277,10 @@ public class EgressPoller implements ControlledFragmentHandler
                 leaderMemberId = sessionEventDecoder.leaderMemberId();
                 eventCode = sessionEventDecoder.code();
                 version = sessionEventDecoder.version();
+                leaderHeartbeatTimeoutNs = leaderHeartbeatTimeoutNs(sessionEventDecoder);
                 detail = sessionEventDecoder.detail();
                 isPollComplete = true;
+                egressImage = (Image)header.context();
                 return Action.BREAK;
 
             case NewLeaderEventDecoder.TEMPLATE_ID:
@@ -247,8 +293,9 @@ public class EgressPoller implements ControlledFragmentHandler
                 clusterSessionId = newLeaderEventDecoder.clusterSessionId();
                 leadershipTermId = newLeaderEventDecoder.leadershipTermId();
                 leaderMemberId = newLeaderEventDecoder.leaderMemberId();
-                detail = newLeaderEventDecoder.memberEndpoints();
+                detail = newLeaderEventDecoder.ingressEndpoints();
                 isPollComplete = true;
+                egressImage = (Image)header.context();
                 return Action.BREAK;
 
             case ChallengeDecoder.TEMPLATE_ID:
@@ -258,8 +305,10 @@ public class EgressPoller implements ControlledFragmentHandler
                     messageHeaderDecoder.blockLength(),
                     messageHeaderDecoder.version());
 
-                encodedChallenge = new byte[challengeDecoder.encodedChallengeLength()];
-                challengeDecoder.getEncodedChallenge(encodedChallenge, 0, challengeDecoder.encodedChallengeLength());
+                final int encodedChallengeLength = challengeDecoder.encodedChallengeLength();
+                encodedChallenge =
+                    0 == encodedChallengeLength ? ArrayUtil.EMPTY_BYTE_ARRAY : new byte[encodedChallengeLength];
+                challengeDecoder.getEncodedChallenge(encodedChallenge, 0, encodedChallengeLength);
 
                 clusterSessionId = challengeDecoder.clusterSessionId();
                 correlationId = challengeDecoder.correlationId();
@@ -268,5 +317,17 @@ public class EgressPoller implements ControlledFragmentHandler
         }
 
         return Action.CONTINUE;
+    }
+
+    private static long leaderHeartbeatTimeoutNs(final SessionEventDecoder sessionEventDecoder)
+    {
+        final long leaderHeartbeatTimeoutNs = sessionEventDecoder.leaderHeartbeatTimeoutNs();
+
+        if (leaderHeartbeatTimeoutNs == SessionEventDecoder.leaderHeartbeatTimeoutNsNullValue())
+        {
+            return Aeron.NULL_VALUE;
+        }
+
+        return leaderHeartbeatTimeoutNs;
     }
 }

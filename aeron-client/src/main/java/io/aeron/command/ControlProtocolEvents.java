@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,11 +15,46 @@
  */
 package io.aeron.command;
 
+import org.agrona.SemanticVersion;
+
 /**
  * List of events used in the control protocol between client and the media driver.
  */
-public class ControlProtocolEvents
+public final class ControlProtocolEvents
 {
+    private ControlProtocolEvents()
+    {
+    }
+
+    /**
+     * Major version of the control protocol between client and the media driver.
+     *
+     * @since 1.49.0
+     */
+    public static final int CONTROL_PROTOCOL_MAJOR_VERSION = 1;
+
+    /**
+     * Minor version of the control protocol between client and the media driver.
+     *
+     * @since 1.49.0
+     */
+    public static final int CONTROL_PROTOCOL_MINOR_VERSION = 0;
+
+    /**
+     * Patch version of the control protocol between client and the media driver.
+     *
+     * @since 1.49.0
+     */
+    public static final int CONTROL_PROTOCOL_PATCH_VERSION = 0;
+
+    /**
+     * Semantic version of the control protocol between clients and media driver.
+     *
+     * @since 1.49.0
+     */
+    public static final int CONTROL_PROTOCOL_SEMANTIC_VERSION = SemanticVersion.compose(
+        CONTROL_PROTOCOL_MAJOR_VERSION, CONTROL_PROTOCOL_MINOR_VERSION, CONTROL_PROTOCOL_PATCH_VERSION);
+
     // Clients to Media Driver
 
     /**
@@ -63,12 +98,12 @@ public class ControlProtocolEvents
     public static final int REMOVE_DESTINATION = 0x08;
 
     /**
-     * Add a Counter to the counters manager.
+     * Add a Counter to the counters-manager.
      */
     public static final int ADD_COUNTER = 0x09;
 
     /**
-     * Remove a Counter from the counters manager.
+     * Remove a Counter from the counters-manager.
      */
     public static final int REMOVE_COUNTER = 0x0A;
 
@@ -91,6 +126,35 @@ public class ControlProtocolEvents
      * Request the driver to terminate.
      */
     public static final int TERMINATE_DRIVER = 0x0E;
+
+    /**
+     * Add or return a static Counter, i.e. the Counter that cannot be deleted and whose lifecycle is decoupled from
+     * the Aeron instance that created it.
+     *
+     * @since 1.45.0
+     */
+    public static final int ADD_STATIC_COUNTER = 0x0F;
+
+    /**
+     * Invalidate an image.
+     *
+     * @since 1.47.0
+     */
+    public static final int REJECT_IMAGE = 0x10;
+
+    /**
+     * Remove a destination by registration id.
+     *
+     * @since 1.47.0
+     */
+    public static final int REMOVE_DESTINATION_BY_ID = 0x11;
+
+    /**
+     * Get next available session id from the media driver.
+     *
+     * @since 1.49.0
+     */
+    public static final int GET_NEXT_AVAILABLE_SESSION_ID = 0x12;
 
     // Media Driver to Clients
 
@@ -143,4 +207,25 @@ public class ControlProtocolEvents
      * Inform clients of client timeout.
      */
     public static final int ON_CLIENT_TIMEOUT = 0x0F0A;
+
+    /**
+     * A response to {@link #ADD_STATIC_COUNTER} command.
+     *
+     * @since 1.45.0
+     */
+    public static final int ON_STATIC_COUNTER = 0x0F0B;
+
+    /**
+     * Inform clients of error frame received by publication.
+     *
+     * @since 1.47.0
+     */
+    public static final int ON_PUBLICATION_ERROR = 0x0F0C;
+
+    /**
+     * A response to the {@link #GET_NEXT_AVAILABLE_SESSION_ID} command.
+     *
+     * @since 1.49.0
+     */
+    public static final int ON_NEXT_AVAILABLE_SESSION_ID = 0x0F0D;
 }

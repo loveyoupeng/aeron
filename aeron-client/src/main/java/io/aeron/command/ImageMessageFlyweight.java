@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,12 +21,12 @@ import static org.agrona.BitUtil.SIZE_OF_INT;
 import static org.agrona.BitUtil.SIZE_OF_LONG;
 
 /**
- * Control message flyweight for any message that needs to represent a connection
+ * Control message flyweight for any message that needs to represent a connection.
  * <pre>
  *   0                   1                   2                   3
  *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *  |                        Correlation ID                         |
+ *  |                       Correlation ID                          |
  *  |                                                               |
  *  +---------------------------------------------------------------+
  *  |                 Subscription Registration ID                  |
@@ -53,11 +53,20 @@ public class ImageMessageFlyweight
     private int lengthOfChannel;
 
     /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public ImageMessageFlyweight()
+    {
+    }
+
+    /**
      * Wrap the buffer at a given offset for updates.
      *
      * @param buffer to wrap
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
     public final ImageMessageFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
@@ -68,9 +77,9 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * return correlation id field
+     * The correlation id field.
      *
-     * @return correlation id field
+     * @return correlation id field.
      */
     public long correlationId()
     {
@@ -78,10 +87,10 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * set correlation id field
+     * Set the correlation id field.
      *
-     * @param correlationId field value
-     * @return flyweight
+     * @param correlationId field value.
+     * @return this for a fluent API.
      */
     public ImageMessageFlyweight correlationId(final long correlationId)
     {
@@ -103,8 +112,8 @@ public class ImageMessageFlyweight
     /**
      * Set the registration ID for the subscription.
      *
-     * @param registrationId for the subscription
-     * @return flyweight
+     * @param registrationId for the subscription.
+     * @return this for a fluent API.
      */
     public ImageMessageFlyweight subscriptionRegistrationId(final long registrationId)
     {
@@ -114,9 +123,9 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * return stream id field
+     * The stream id field.
      *
-     * @return stream id field
+     * @return stream id field.
      */
     public int streamId()
     {
@@ -124,10 +133,10 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * set stream id field
+     * Set the stream id field.
      *
-     * @param streamId field value
-     * @return flyweight
+     * @param streamId field value.
+     * @return this for a fluent API.
      */
     public ImageMessageFlyweight streamId(final int streamId)
     {
@@ -137,9 +146,9 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * Get the channel field as ASCII
+     * Get the channel field as ASCII.
      *
-     * @return channel field
+     * @return channel field.
      */
     public String channel()
     {
@@ -163,10 +172,10 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * Set the channel field as ASCII
+     * Set the channel field as ASCII.
      *
-     * @param channel field value
-     * @return flyweight
+     * @param channel field value.
+     * @return this for a fluent API.
      */
     public ImageMessageFlyweight channel(final String channel)
     {
@@ -176,11 +185,11 @@ public class ImageMessageFlyweight
     }
 
     /**
-     * Get the length of the current message
+     * Get the length of the current message.
      * <p>
      * NB: must be called after the data is written in order to be accurate.
      *
-     * @return the length of the current message
+     * @return the length of the current message.
      */
     public int length()
     {

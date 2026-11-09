@@ -1,5 +1,5 @@
 /*
- *  Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,55 +15,90 @@
  */
 package io.aeron.cluster;
 
-import io.aeron.*;
+import io.aeron.Aeron;
+import io.aeron.ChannelUri;
+import io.aeron.Counter;
+import io.aeron.ExclusivePublication;
+import io.aeron.FragmentAssembler;
+import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
+import io.aeron.archive.client.ArchiveException;
 import io.aeron.archive.client.ControlResponsePoller;
+import io.aeron.archive.client.RecordingSignalPoller;
 import io.aeron.archive.codecs.ControlResponseCode;
-import io.aeron.archive.codecs.SourceLocation;
+import io.aeron.archive.codecs.ControlResponseDecoder;
+import io.aeron.archive.codecs.RecordingSignalEventDecoder;
 import io.aeron.archive.status.RecordingPos;
 import io.aeron.cluster.client.AeronCluster;
+import io.aeron.cluster.client.ClusterEvent;
 import io.aeron.cluster.client.ClusterException;
 import io.aeron.cluster.codecs.BackupResponseDecoder;
+import io.aeron.cluster.codecs.ChallengeDecoder;
+import io.aeron.cluster.codecs.EventCode;
 import io.aeron.cluster.codecs.MessageHeaderDecoder;
+import io.aeron.cluster.codecs.SessionEventDecoder;
+import io.aeron.cluster.logging.ClusterTracing;
 import io.aeron.cluster.service.ClusterMarkFile;
+import io.aeron.exceptions.TimeoutException;
 import io.aeron.logbuffer.Header;
+import org.agrona.BitUtil;
 import org.agrona.CloseHelper;
 import org.agrona.DirectBuffer;
-import org.agrona.collections.ArrayUtil;
-import org.agrona.collections.Long2LongHashMap;
+import org.agrona.ErrorHandler;
 import org.agrona.concurrent.Agent;
 import org.agrona.concurrent.AgentInvoker;
+import org.agrona.concurrent.AgentTerminationException;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.status.CountersReader;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static io.aeron.Aeron.NULL_VALUE;
-import static io.aeron.CommonContext.ENDPOINT_PARAM_NAME;
-import static io.aeron.archive.client.AeronArchive.*;
-import static io.aeron.cluster.ClusterBackup.State.*;
-import static io.aeron.cluster.MemberStatusAdapter.FRAGMENT_POLL_LIMIT;
+import static io.aeron.CommonContext.*;
+import static io.aeron.archive.client.AeronArchive.NULL_LENGTH;
+import static io.aeron.archive.client.AeronArchive.NULL_POSITION;
+import static io.aeron.archive.client.AeronArchive.NULL_TIMESTAMP;
+import static io.aeron.archive.codecs.SourceLocation.REMOTE;
+import static io.aeron.cluster.ClusterBackup.AERON_CLUSTER_BACKUP_THREAD_NAME;
+import static io.aeron.cluster.ClusterBackup.AERON_CLUSTER_BACKUP_THREAD_NAME_CLASSIC;
+import static io.aeron.cluster.ClusterBackup.State.BACKING_UP;
+import static io.aeron.cluster.ClusterBackup.State.BACKUP_QUERY;
+import static io.aeron.cluster.ClusterBackup.State.CLOSED;
+import static io.aeron.cluster.ClusterBackup.State.LIVE_LOG_RECORD;
+import static io.aeron.cluster.ClusterBackup.State.LIVE_LOG_REPLAY;
+import static io.aeron.cluster.ClusterBackup.State.RESET_BACKUP;
+import static io.aeron.cluster.ClusterBackup.State.SNAPSHOT_RETRIEVE;
+import static io.aeron.cluster.ClusterBackup.State.UPDATE_RECORDING_LOG;
+import static io.aeron.exceptions.AeronException.Category;
 import static org.agrona.concurrent.status.CountersReader.NULL_COUNTER_ID;
 
 /**
  * {@link Agent} which backs up a remote cluster by replicating the log and polling for snapshots.
  */
-public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
+public final class ClusterBackupAgent implements Agent
 {
+    /**
+     * Update interval for cluster mark file.
+     */
+    public static final long MARK_FILE_UPDATE_INTERVAL_MS = TimeUnit.SECONDS.toMillis(1);
+
+    private static final int SLOW_TICK_INTERVAL_MS = 10;
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final BackupResponseDecoder backupResponseDecoder = new BackupResponseDecoder();
+    private final ChallengeDecoder challengeDecoder = new ChallengeDecoder();
+    private final SessionEventDecoder sessionEventDecoder = new SessionEventDecoder();
 
     private final ClusterBackup.Context ctx;
     private final ClusterMarkFile markFile;
     private final AgentInvoker aeronClientInvoker;
     private final EpochClock epochClock;
     private final Aeron aeron;
-    private final String[] clusterMemberStatusEndpoints;
-    private final MemberStatusPublisher memberStatusPublisher = new MemberStatusPublisher();
+    private final ConsensusPublisher consensusPublisher = new ConsensusPublisher();
     private final ArrayList<RecordingLog.Snapshot> snapshotsToRetrieve = new ArrayList<>(4);
     private final ArrayList<RecordingLog.Snapshot> snapshotsRetrieved = new ArrayList<>(4);
-    private final Long2LongHashMap snapshotLengthMap = new Long2LongHashMap(NULL_LENGTH);
     private final Counter stateCounter;
     private final Counter liveLogPositionCounter;
     private final Counter nextQueryDeadlineMsCounter;
@@ -71,107 +106,151 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
     private final long backupResponseTimeoutMs;
     private final long backupQueryIntervalMs;
     private final long backupProgressTimeoutMs;
+    private final long coolDownIntervalMs;
+    private final long unavailableCounterHandlerRegistrationId;
+    private final PublicationGroup<ExclusivePublication> consensusPublicationGroup;
+    private final LogSourceValidator logSourceValidator;
+    private final String roleName;
 
-    private ClusterBackup.State state = INIT;
+    private ClusterBackup.State state = BACKUP_QUERY;
 
-    private RecordingLog recordingLog;
-
+    private RecordingSignalPoller recordingSignalPoller;
     private AeronArchive backupArchive;
     private AeronArchive.AsyncConnect clusterArchiveAsyncConnect;
     private AeronArchive clusterArchive;
 
-    private SnapshotRetrieveMonitor snapshotRetrieveMonitor;
+    private SnapshotReplication snapshotReplication;
 
-    private final FragmentAssembler memberStatusFragmentAssembler = new FragmentAssembler(this::onFragment);
-    private final Subscription memberStatusSubscription;
-    private ExclusivePublication memberStatusPublication;
+    private final FragmentAssembler fragmentAssembler = new FragmentAssembler(this::onFragment);
+    private final Subscription consensusSubscription;
     private ClusterMember[] clusterMembers;
-    private ClusterMember leaderMember;
+    private ClusterMember logSupplierMember;
+    private RecordingLog recordingLog;
     private RecordingLog.Entry leaderLogEntry;
     private RecordingLog.Entry leaderLastTermEntry;
+    private Subscription recordingSubscription;
+    private String replayChannel;
+    private String recordingChannel;
 
-    private long timeOfLastTickMs = 0;
+    private long slowTickDeadlineMs = 0;
+    private long markFileUpdateDeadlineMs = 0;
     private long timeOfLastBackupQueryMs = 0;
     private long timeOfLastProgressMs = 0;
+    private long coolDownDeadlineMs = NULL_VALUE;
     private long correlationId = NULL_VALUE;
-    private long leaderLogRecordingId = NULL_VALUE;
-    private long snapshotRetrieveSubscriptionId = NULL_VALUE;
-    private long liveLogReplaySubscriptionId = NULL_VALUE;
+    private long clusterLogRecordingId = NULL_VALUE;
+    private long liveLogRecordingSubscriptionId = NULL_VALUE;
     private long liveLogRecordingId = NULL_VALUE;
-    private long liveLogReplayId = NULL_VALUE;
+    private long liveLogReplaySessionId = NULL_VALUE;
     private int leaderCommitPositionCounterId = NULL_VALUE;
-    private int clusterMembersStatusEndpointsCursor = NULL_VALUE;
-    private int snapshotCursor = 0;
-    private int liveLogReplaySessionId = NULL_VALUE;
-    private int liveLogRecCounterId = NULL_COUNTER_ID;
+    private int liveLogRecordingCounterId = NULL_COUNTER_ID;
+    private int liveLogRecordingSessionId = NULL_VALUE;
 
     ClusterBackupAgent(final ClusterBackup.Context ctx)
     {
         this.ctx = ctx;
         aeron = ctx.aeron();
         epochClock = ctx.epochClock();
+
         backupResponseTimeoutMs = TimeUnit.NANOSECONDS.toMillis(ctx.clusterBackupResponseTimeoutNs());
         backupQueryIntervalMs = TimeUnit.NANOSECONDS.toMillis(ctx.clusterBackupIntervalNs());
         backupProgressTimeoutMs = TimeUnit.NANOSECONDS.toMillis(ctx.clusterBackupProgressTimeoutNs());
+        coolDownIntervalMs = TimeUnit.NANOSECONDS.toMillis(ctx.clusterBackupCoolDownIntervalNs());
         markFile = ctx.clusterMarkFile();
         eventsListener = ctx.eventsListener();
 
-        clusterMemberStatusEndpoints = ctx.clusterMembersStatusEndpoints().split(",");
+        final String[] clusterConsensusEndpoints = ctx.clusterConsensusEndpoints().split(",");
+
+        consensusPublicationGroup = new PublicationGroup<>(
+            clusterConsensusEndpoints, ctx.consensusChannel(), ctx.consensusStreamId(), Aeron::addExclusivePublication);
+        consensusPublicationGroup.shuffle();
 
         aeronClientInvoker = aeron.conductorAgentInvoker();
         aeronClientInvoker.invoke();
 
-        aeron.addUnavailableCounterHandler(this);
+        unavailableCounterHandlerRegistrationId = aeron.addUnavailableCounterHandler(this::onUnavailableCounter);
 
-        memberStatusSubscription = aeron.addSubscription(ctx.memberStatusChannel(), ctx.memberStatusStreamId());
+        consensusSubscription = aeron.addSubscription(ctx.consensusChannel(), ctx.consensusStreamId());
 
         stateCounter = ctx.stateCounter();
         liveLogPositionCounter = ctx.liveLogPositionCounter();
         nextQueryDeadlineMsCounter = ctx.nextQueryDeadlineMsCounter();
+        logSourceValidator = new LogSourceValidator(ctx.sourceType());
+        roleName = threadName(AERON_CLUSTER_BACKUP_THREAD_NAME, AERON_CLUSTER_BACKUP_THREAD_NAME_CLASSIC);
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onStart()
     {
+        recordingLog = new RecordingLog(ctx.clusterDir(), true);
         backupArchive = AeronArchive.connect(ctx.archiveContext().clone());
-        stateCounter.setOrdered(INIT.code());
-        nextQueryDeadlineMsCounter.setOrdered(epochClock.time() - 1);
+        recordingSignalPoller = new RecordingSignalPoller(
+            backupArchive.controlSessionId(),
+            backupArchive.controlResponsePoller().subscription());
+
+        final long nowMs = epochClock.time();
+        nextQueryDeadlineMsCounter.setRelease(nowMs - 1);
+        timeOfLastProgressMs = nowMs;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public void onClose()
     {
-        if (!ctx.ownsAeronClient())
+        if (!aeron.isClosed())
         {
-            CloseHelper.close(memberStatusSubscription);
-            CloseHelper.close(memberStatusPublication);
+            aeron.removeUnavailableCounterHandler(unavailableCounterHandlerRegistrationId);
+
+            CloseHelper.close(ctx.countedErrorHandler(), snapshotReplication);
+            stopReplay();
+            stopRecording();
+
+            if (!ctx.ownsAeronClient())
+            {
+                CloseHelper.closeAll(
+                    (ErrorHandler)ctx.countedErrorHandler(),
+                    consensusSubscription,
+                    consensusPublicationGroup,
+                    recordingSubscription);
+            }
+
+            state(CLOSED, epochClock.time());
         }
 
-        if (NULL_VALUE != liveLogReplaySubscriptionId)
-        {
-            backupArchive.stopRecording(liveLogReplaySubscriptionId);
-        }
+        CloseHelper.closeAll(
+            (ErrorHandler)ctx.countedErrorHandler(),
+            backupArchive,
+            clusterArchiveAsyncConnect,
+            clusterArchive,
+            recordingLog);
 
-        CloseHelper.close(backupArchive);
-        CloseHelper.close(clusterArchiveAsyncConnect);
-        CloseHelper.close(clusterArchive);
-        CloseHelper.close(recordingLog);
+        markFile.signalTerminated();
         ctx.close();
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public int doWork()
     {
         final long nowMs = epochClock.time();
-        int workCount = INIT == state ? init(nowMs) : 0;
-
-        if (nowMs != timeOfLastTickMs)
-        {
-            timeOfLastTickMs = nowMs;
-            workCount += aeronClientInvoker.invoke();
-            markFile.updateActivityTimestamp(nowMs);
-        }
+        int workCount = 0;
 
         try
         {
-            workCount += memberStatusSubscription.poll(memberStatusFragmentAssembler, FRAGMENT_POLL_LIMIT);
+            if (nowMs > slowTickDeadlineMs)
+            {
+                slowTickDeadlineMs = nowMs + SLOW_TICK_INTERVAL_MS;
+                workCount += slowTick(nowMs);
+            }
+
+            workCount += consensusSubscription.poll(fragmentAssembler, ConsensusAdapter.FRAGMENT_LIMIT);
 
             switch (state)
             {
@@ -179,12 +258,12 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
                     workCount += backupQuery(nowMs);
                     break;
 
-                case SNAPSHOT_LENGTH_RETRIEVE:
-                    workCount += snapshotLengthRetrieve(nowMs);
-                    break;
-
                 case SNAPSHOT_RETRIEVE:
                     workCount += snapshotRetrieve(nowMs);
+                    break;
+
+                case LIVE_LOG_RECORD:
+                    workCount += liveLogRecord(nowMs);
                     break;
 
                 case LIVE_LOG_REPLAY:
@@ -195,30 +274,37 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
                     workCount += updateRecordingLog(nowMs);
                     break;
 
+                case BACKING_UP:
+                    workCount += backingUp(nowMs);
+                    break;
+
                 case RESET_BACKUP:
                     workCount += resetBackup(nowMs);
                     break;
 
-                case BACKING_UP:
-                    workCount += backingUp(nowMs);
-                    break;
+                case CLOSED:
+                    return workCount;
             }
 
             if (hasProgressStalled(nowMs))
             {
                 if (null != eventsListener)
                 {
-                    eventsListener.onPossibleClusterFailure();
+                    eventsListener.onPossibleFailure(new TimeoutException("progress has stalled", Category.WARN));
                 }
 
                 state(RESET_BACKUP, nowMs);
             }
         }
+        catch (final AgentTerminationException ex)
+        {
+            runTerminationHooks(ex);
+        }
         catch (final Exception ex)
         {
             if (null != eventsListener)
             {
-                eventsListener.onPossibleClusterFailure();
+                eventsListener.onPossibleFailure(ex);
             }
 
             state(RESET_BACKUP, nowMs);
@@ -228,45 +314,93 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
         return workCount;
     }
 
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public String roleName()
     {
-        return "cluster-backup";
+        return roleName;
     }
 
-    public void reset()
+    private void reset()
     {
         clusterMembers = null;
-        leaderMember = null;
-        snapshotsToRetrieve.clear();
-        snapshotsRetrieved.clear();
-        snapshotLengthMap.clear();
+        logSupplierMember = null;
         leaderLogEntry = null;
         leaderLastTermEntry = null;
-        clusterMembersStatusEndpointsCursor = NULL_VALUE;
-
-        if (null != recordingLog)
-        {
-            recordingLog.close();
-            recordingLog = null;
-        }
-
-        memberStatusFragmentAssembler.clear();
-        final ExclusivePublication memberStatusPublication = this.memberStatusPublication;
-        final AeronArchive clusterArchive = this.clusterArchive;
-        final AeronArchive.AsyncConnect clusterArchiveAsyncConnect = this.clusterArchiveAsyncConnect;
-
-        this.memberStatusPublication = null;
-        this.clusterArchive = null;
-        this.clusterArchiveAsyncConnect = null;
-
-        correlationId = NULL_VALUE;
-        liveLogRecCounterId = NULL_COUNTER_ID;
+        liveLogRecordingCounterId = NULL_COUNTER_ID;
         liveLogRecordingId = NULL_VALUE;
-        liveLogReplayId = NULL_VALUE;
-        liveLogReplaySubscriptionId = NULL_VALUE;
+        liveLogRecordingSessionId = NULL_VALUE;
+
+        snapshotsToRetrieve.clear();
+        snapshotsRetrieved.clear();
+        fragmentAssembler.clear();
+
+        CloseHelper.close(snapshotReplication);
+        snapshotReplication = null;
+
+        stopRecording();
+        stopReplay();
 
         CloseHelper.closeAll(
-            memberStatusPublication, clusterArchive, clusterArchiveAsyncConnect);
+            (ErrorHandler)ctx.countedErrorHandler(),
+            consensusPublicationGroup,
+            clusterArchive,
+            clusterArchiveAsyncConnect,
+            recordingSubscription);
+
+        clusterArchive = null;
+        clusterArchiveAsyncConnect = null;
+        recordingSubscription = null;
+    }
+
+    private void stopReplay()
+    {
+        if (NULL_VALUE != liveLogReplaySessionId)
+        {
+            if (null != clusterArchive)
+            {
+                try
+                {
+                    clusterArchive.stopReplay(liveLogReplaySessionId);
+                }
+                catch (final Exception ex)
+                {
+                    ctx.countedErrorHandler().onError(new ClusterEvent("failed to stop log replay: " + ex));
+                }
+            }
+            liveLogReplaySessionId = NULL_VALUE;
+        }
+    }
+
+    private void stopRecording()
+    {
+        if (NULL_VALUE != liveLogRecordingSubscriptionId)
+        {
+            try
+            {
+                backupArchive.tryStopRecording(liveLogRecordingSubscriptionId);
+            }
+            catch (final Exception ex)
+            {
+                ctx.countedErrorHandler().onError(new ClusterEvent("failed to stop log recording: " + ex));
+            }
+            liveLogRecordingSubscriptionId = NULL_VALUE;
+        }
+    }
+
+    private void onUnavailableCounter(final CountersReader counters, final long registrationId, final int counterId)
+    {
+        if (counterId == liveLogRecordingCounterId)
+        {
+            if (null != eventsListener)
+            {
+                eventsListener.onPossibleFailure(new ClusterEvent("log recording counter unexpectedly unavailable"));
+            }
+
+            state(RESET_BACKUP, epochClock.time());
+        }
     }
 
     private void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
@@ -279,39 +413,49 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
             throw new ClusterException("expected schemaId=" + MessageHeaderDecoder.SCHEMA_ID + ", actual=" + schemaId);
         }
 
-        if (messageHeaderDecoder.templateId() == BackupResponseDecoder.TEMPLATE_ID)
+        switch (messageHeaderDecoder.templateId())
         {
-            backupResponseDecoder.wrap(
-                buffer,
-                offset + MessageHeaderDecoder.ENCODED_LENGTH,
-                messageHeaderDecoder.blockLength(),
-                messageHeaderDecoder.version());
+            case BackupResponseDecoder.TEMPLATE_ID:
+                backupResponseDecoder.wrap(
+                    buffer,
+                    offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    messageHeaderDecoder.blockLength(),
+                    messageHeaderDecoder.version());
 
-            onBackupResponse(
-                backupResponseDecoder.correlationId(),
-                backupResponseDecoder.logRecordingId(),
-                backupResponseDecoder.logLeadershipTermId(),
-                backupResponseDecoder.logTermBaseLogPosition(),
-                backupResponseDecoder.lastLeadershipTermId(),
-                backupResponseDecoder.lastTermBaseLogPosition(),
-                backupResponseDecoder.commitPositionCounterId(),
-                backupResponseDecoder.leaderMemberId(),
-                backupResponseDecoder);
-        }
-    }
+                final int memberId = BackupResponseDecoder.memberIdNullValue() != backupResponseDecoder.memberId() ?
+                    backupResponseDecoder.memberId() : NULL_VALUE;
 
-    public void onUnavailableCounter(
-        final CountersReader countersReader, final long registrationId, final int counterId)
-    {
-        if (counterId == liveLogRecCounterId ||
-            (null != snapshotRetrieveMonitor && counterId == snapshotRetrieveMonitor.counterId))
-        {
-            if (null != eventsListener)
-            {
-                eventsListener.onPossibleClusterFailure();
-            }
+                onBackupResponse(
+                    backupResponseDecoder.correlationId(),
+                    backupResponseDecoder.logRecordingId(),
+                    backupResponseDecoder.logLeadershipTermId(),
+                    backupResponseDecoder.logTermBaseLogPosition(),
+                    backupResponseDecoder.lastLeadershipTermId(),
+                    backupResponseDecoder.lastTermBaseLogPosition(),
+                    backupResponseDecoder.commitPositionCounterId(),
+                    backupResponseDecoder.leaderMemberId(),
+                    memberId,
+                    backupResponseDecoder);
+                break;
 
-            state(RESET_BACKUP, epochClock.time());
+            case ChallengeDecoder.TEMPLATE_ID:
+                challengeDecoder.wrapAndApplyHeader(buffer, offset, messageHeaderDecoder);
+                final byte[] encodedChallenge = new byte[challengeDecoder.encodedChallengeLength()];
+                challengeDecoder.getEncodedChallenge(encodedChallenge, 0, challengeDecoder.encodedChallengeLength());
+
+                onChallenge(challengeDecoder.clusterSessionId(), encodedChallenge);
+                break;
+
+            case SessionEventDecoder.TEMPLATE_ID:
+                sessionEventDecoder.wrapAndApplyHeader(buffer, offset, messageHeaderDecoder);
+
+                final long correlationId = sessionEventDecoder.correlationId();
+                final int leaderMemberId = sessionEventDecoder.leaderMemberId();
+                final EventCode eventCode = sessionEventDecoder.code();
+                final String detail = sessionEventDecoder.detail();
+
+                onSessionEvent(correlationId, leaderMemberId, eventCode, detail);
+                break;
         }
     }
 
@@ -325,8 +469,28 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
         final long lastTermBaseLogPosition,
         final int commitPositionCounterId,
         final int leaderMemberId,
+        final int memberId,
         final BackupResponseDecoder backupResponseDecoder)
     {
+        if (NULL_VALUE == memberId)
+        {
+            ctx.errorHandler().onError(new ClusterEvent(
+                "onBackupResponse(): memberId is null, retrying for compatible node"));
+            state(RESET_BACKUP, epochClock.time());
+            return;
+        }
+        else if (!logSourceValidator.isAcceptable(leaderMemberId, memberId))
+        {
+            consensusPublicationGroup.closeAndExcludeCurrent();
+            state(RESET_BACKUP, epochClock.time());
+            return;
+        }
+        else if (null != logSupplierMember && logSupplierMember.id() != memberId)
+        {
+            state(RESET_BACKUP, epochClock.time());
+            return;
+        }
+
         if (BACKUP_QUERY == state && correlationId == this.correlationId)
         {
             final BackupResponseDecoder.SnapshotsDecoder snapshotsDecoder = backupResponseDecoder.snapshots();
@@ -337,12 +501,9 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
                 {
                     final RecordingLog.Entry entry = recordingLog.getLatestSnapshot(snapshot.serviceId());
 
-                    if (null != entry)
+                    if (null != entry && snapshot.logPosition() == entry.logPosition)
                     {
-                        if (snapshot.logPosition() == entry.logPosition)
-                        {
-                            continue;
-                        }
+                        continue;
                     }
 
                     snapshotsToRetrieve.add(new RecordingLog.Snapshot(
@@ -355,12 +516,11 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
                 }
             }
 
-            final RecordingLog.Entry lastTerm = recordingLog.findLastTerm();
-
-            if (null == leaderMember || leaderMember.id() != leaderMemberId || logRecordingId != leaderLogRecordingId)
+            if (null == logSupplierMember ||
+                memberId != logSupplierMember.id() ||
+                logRecordingId != clusterLogRecordingId)
             {
-                leaderLogRecordingId = logRecordingId;
-
+                clusterLogRecordingId = logRecordingId;
                 leaderLogEntry = new RecordingLog.Entry(
                     logRecordingId,
                     logLeadershipTermId,
@@ -369,12 +529,14 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
                     NULL_TIMESTAMP,
                     NULL_VALUE,
                     RecordingLog.ENTRY_TYPE_TERM,
+                    null,
+                    true,
                     -1);
             }
 
-            if (null == lastTerm ||
-                lastLeadershipTermId != lastTerm.leadershipTermId ||
-                lastTermBaseLogPosition != lastTerm.termBaseLogPosition)
+            final RecordingLog.Entry lastTerm = recordingLog.findLastTerm();
+
+            if (null == lastTerm || lastLeadershipTermId != lastTerm.leadershipTermId)
             {
                 leaderLastTermEntry = new RecordingLog.Entry(
                     logRecordingId,
@@ -384,106 +546,157 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
                     NULL_TIMESTAMP,
                     NULL_VALUE,
                     RecordingLog.ENTRY_TYPE_TERM,
+                    null,
+                    true,
                     -1);
             }
 
             timeOfLastBackupQueryMs = 0;
-            snapshotCursor = 0;
             this.correlationId = NULL_VALUE;
             leaderCommitPositionCounterId = commitPositionCounterId;
 
             clusterMembers = ClusterMember.parse(backupResponseDecoder.clusterMembers());
-            leaderMember = ClusterMember.findMember(clusterMembers, leaderMemberId);
+            ClusterMember.setIsLeader(clusterMembers, leaderMemberId);
+
+            logSupplierMember = ClusterMember.findMember(clusterMembers, memberId);
+            if (null == logSupplierMember)
+            {
+                throw new ClusterException(memberId + " not found in " + Arrays.toString(clusterMembers));
+            }
+
+            logSupplierMember.leadershipTermId(logLeadershipTermId);
 
             if (null != eventsListener)
             {
-                eventsListener.onBackupResponse(clusterMembers, leaderMember, snapshotsToRetrieve);
+                eventsListener.onBackupResponse(clusterMembers, logSupplierMember, snapshotsToRetrieve);
             }
 
             if (null == clusterArchive)
             {
-                final ChannelUri leaderArchiveUri = ChannelUri.parse(ctx.archiveContext().controlRequestChannel());
-                leaderArchiveUri.put(ENDPOINT_PARAM_NAME, leaderMember.archiveEndpoint());
-
-                final AeronArchive.Context leaderArchiveCtx = new AeronArchive.Context()
-                    .aeron(ctx.aeron())
-                    .controlRequestChannel(leaderArchiveUri.toString())
-                    .controlRequestStreamId(ctx.archiveContext().controlRequestStreamId())
-                    .controlResponseChannel(ctx.archiveContext().controlResponseChannel())
-                    .controlResponseStreamId(ctx.archiveContext().controlResponseStreamId());
-
                 CloseHelper.close(clusterArchiveAsyncConnect);
-                clusterArchiveAsyncConnect = AeronArchive.asyncConnect(leaderArchiveCtx);
+
+                final AeronArchive.Context context = ctx.clusterArchiveContext().clone();
+                final ChannelUri logSupplierArchiveUri = ChannelUri.parse(context.controlRequestChannel());
+                logSupplierArchiveUri.put(ENDPOINT_PARAM_NAME, logSupplierMember.archiveEndpoint());
+                context.controlRequestChannel(logSupplierArchiveUri.toString());
+
+                if (null != logSupplierMember.archiveResponseEndpoint())
+                {
+                    final ChannelUri logSupplierResponseUri = ChannelUri.parse(context.controlResponseChannel());
+                    logSupplierResponseUri.put(MDC_CONTROL_MODE_PARAM_NAME, CONTROL_MODE_RESPONSE);
+                    logSupplierResponseUri.remove(ENDPOINT_PARAM_NAME);
+                    logSupplierResponseUri.put(MDC_CONTROL_PARAM_NAME, logSupplierMember.archiveResponseEndpoint());
+                    context.controlResponseChannel(logSupplierResponseUri.toString());
+                }
+
+                clusterArchiveAsyncConnect = AeronArchive.asyncConnect(context);
             }
 
             final long nowMs = epochClock.time();
-
             timeOfLastProgressMs = nowMs;
+            state(snapshotsToRetrieve.isEmpty() ? LIVE_LOG_RECORD : SNAPSHOT_RETRIEVE, nowMs);
+        }
+    }
 
-            if (snapshotsToRetrieve.isEmpty())
+    private void onChallenge(final long clusterSessionId, final byte[] encodedChallenge)
+    {
+        final byte[] challengeResponse = ctx.credentialsSupplier().onChallenge(encodedChallenge);
+
+        correlationId = ctx.aeron().nextCorrelationId();
+        consensusPublisher.challengeResponse(
+            consensusPublicationGroup.current(), this.correlationId, clusterSessionId, challengeResponse);
+    }
+
+    private void onSessionEvent(
+        final long correlationId,
+        final int leaderMemberId,
+        final EventCode eventCode,
+        final String detail)
+    {
+        if (this.correlationId == correlationId)
+        {
+            if (EventCode.ERROR == eventCode || EventCode.AUTHENTICATION_REJECTED == eventCode)
             {
-                state(LIVE_LOG_REPLAY, nowMs);
+                throw new ClusterException(eventCode + ": " + detail);
             }
-            else
+            else if (EventCode.REDIRECT == eventCode)
             {
-                state(SNAPSHOT_LENGTH_RETRIEVE, nowMs);
+                consensusPublicationGroup.closeAndExcludeCurrent();
+                state(RESET_BACKUP, epochClock.time());
             }
         }
     }
 
-    private int init(final long nowMs)
+    private int slowTick(final long nowMs)
     {
-        CloseHelper.close(recordingLog);
-        recordingLog = new RecordingLog(ctx.clusterDir());
-        timeOfLastProgressMs = nowMs;
-        state(BACKUP_QUERY, nowMs);
-        return 1;
+        int workCount = aeronClientInvoker.invoke();
+        if (aeron.isClosed())
+        {
+            throw new AgentTerminationException("unexpected Aeron close");
+        }
+
+        if (nowMs >= markFileUpdateDeadlineMs)
+        {
+            markFileUpdateDeadlineMs = nowMs + MARK_FILE_UPDATE_INTERVAL_MS;
+            markFile.updateActivityTimestamp(nowMs);
+        }
+
+        workCount += pollBackupArchiveEvents();
+
+        if (NULL_VALUE == correlationId && null != clusterArchive)
+        {
+            final String errorResponse = clusterArchive.pollForErrorResponse();
+            if (null != errorResponse)
+            {
+                ctx.countedErrorHandler().onError(new ClusterEvent("cluster archive error: " + errorResponse));
+                state(RESET_BACKUP, nowMs);
+            }
+        }
+
+        return workCount;
     }
 
     private int resetBackup(final long nowMs)
     {
-        reset();
         timeOfLastProgressMs = nowMs;
-        state(INIT, nowMs);
-        return 1;
+
+        if (NULL_VALUE == coolDownDeadlineMs)
+        {
+            coolDownDeadlineMs = nowMs + coolDownIntervalMs;
+            reset();
+            return 1;
+        }
+        else if (nowMs > coolDownDeadlineMs)
+        {
+            coolDownDeadlineMs = NULL_VALUE;
+            state(BACKUP_QUERY, nowMs);
+            return 1;
+        }
+
+        return 0;
     }
 
     private int backupQuery(final long nowMs)
     {
-        if (null == memberStatusPublication || nowMs > (timeOfLastBackupQueryMs + backupResponseTimeoutMs))
+        if (null == consensusPublicationGroup.current() || nowMs > (timeOfLastBackupQueryMs + backupResponseTimeoutMs))
         {
-            int cursor = ++clusterMembersStatusEndpointsCursor;
-            if (cursor >= clusterMemberStatusEndpoints.length)
-            {
-                clusterMembersStatusEndpointsCursor = 0;
-                cursor = 0;
-            }
-
-            CloseHelper.close(clusterArchiveAsyncConnect);
-            clusterArchiveAsyncConnect = null;
-            CloseHelper.close(clusterArchive);
-            clusterArchive = null;
-
-            CloseHelper.close(memberStatusPublication);
-            final ChannelUri uri = ChannelUri.parse(ctx.memberStatusChannel());
-            uri.put(ENDPOINT_PARAM_NAME, clusterMemberStatusEndpoints[cursor]);
-            memberStatusPublication = aeron.addExclusivePublication(uri.toString(), ctx.memberStatusStreamId());
+            consensusPublicationGroup.next(aeron);
             correlationId = NULL_VALUE;
             timeOfLastBackupQueryMs = nowMs;
-
             return 1;
         }
-        else if (NULL_VALUE == correlationId && memberStatusPublication.isConnected())
+        else if (NULL_VALUE == correlationId && consensusPublicationGroup.isConnected())
         {
             final long correlationId = aeron.nextCorrelationId();
 
-            if (memberStatusPublisher.backupQuery(
-                memberStatusPublication,
+            if (consensusPublisher.backupQuery(
+                consensusPublicationGroup.current(),
                 correlationId,
-                ctx.memberStatusStreamId(),
+                ctx.consensusStreamId(),
                 AeronCluster.Configuration.PROTOCOL_SEMANTIC_VERSION,
-                ctx.memberStatusChannel(),
-                ArrayUtil.EMPTY_BYTE_ARRAY))
+                Long.MAX_VALUE,
+                ctx.consensusChannel(),
+                ctx.credentialsSupplier().encodedCredentials()))
             {
                 timeOfLastBackupQueryMs = nowMs;
                 this.correlationId = correlationId;
@@ -495,132 +708,109 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
         return 0;
     }
 
-    private int snapshotLengthRetrieve(final long nowMs)
-    {
-        int workCount = 0;
-
-        if (null == clusterArchive)
-        {
-            clusterArchive = clusterArchiveAsyncConnect.poll();
-            return null == clusterArchive ? 0 : 1;
-        }
-
-        if (NULL_VALUE == correlationId)
-        {
-            final long stopPositionCorrelationId = ctx.aeron().nextCorrelationId();
-            final RecordingLog.Snapshot snapshot = snapshotsToRetrieve.get(snapshotCursor);
-
-            if (clusterArchive.archiveProxy().getStopPosition(
-                snapshot.recordingId,
-                stopPositionCorrelationId,
-                clusterArchive.controlSessionId()))
-            {
-                correlationId = stopPositionCorrelationId;
-                timeOfLastProgressMs = nowMs;
-                workCount++;
-            }
-        }
-        else if (pollForResponse(clusterArchive, correlationId))
-        {
-            final long snapshotStopPosition = (int)clusterArchive.controlResponsePoller().relevantId();
-
-            correlationId = NULL_VALUE;
-
-            if (NULL_POSITION == snapshotStopPosition)
-            {
-                state(RESET_BACKUP, nowMs);
-            }
-
-            snapshotLengthMap.put(snapshotCursor, snapshotStopPosition);
-            if (++snapshotCursor >= snapshotsToRetrieve.size())
-            {
-                snapshotCursor = 0;
-                state(SNAPSHOT_RETRIEVE, nowMs);
-            }
-
-            timeOfLastProgressMs = nowMs;
-            workCount++;
-        }
-
-        return workCount;
-    }
-
     private int snapshotRetrieve(final long nowMs)
     {
         int workCount = 0;
 
         if (null == clusterArchive)
         {
+            final int step = clusterArchiveAsyncConnect.step();
             clusterArchive = clusterArchiveAsyncConnect.poll();
-            return null == clusterArchive ? 0 : 1;
+            return null == clusterArchive ? clusterArchiveAsyncConnect.step() - step : 1;
         }
 
-        if (null != snapshotRetrieveMonitor)
+        if (null == snapshotReplication)
         {
-            if (snapshotRetrieveMonitor.hasRecordingProgressed())
-            {
-                timeOfLastProgressMs = nowMs;
-                workCount++;
-            }
-            else if (snapshotRetrieveMonitor.isDone())
-            {
-                final RecordingLog.Snapshot snapshot = snapshotsToRetrieve.get(snapshotCursor);
+            final ChannelUri replicationUri = ChannelUri.parse(ctx.catchupChannel());
+            replicationUri.put(ENDPOINT_PARAM_NAME, ctx.catchupEndpoint());
+            snapshotReplication = new SnapshotReplication(
+                backupArchive,
+                clusterArchive.context().controlRequestStreamId(),
+                clusterArchive.context().controlRequestChannel(),
+                replicationUri.toString(),
+                ctx.replicationProgressTimeoutNs(),
+                ctx.replicationProgressIntervalNs());
 
-                snapshotsRetrieved.add(new RecordingLog.Snapshot(
-                    snapshotRetrieveMonitor.recordingId,
-                    snapshot.leadershipTermId,
-                    snapshot.termBaseLogPosition,
-                    snapshot.logPosition,
-                    snapshot.timestamp,
-                    snapshot.serviceId));
-
-                backupArchive.stopRecording(snapshotRetrieveSubscriptionId);
-                snapshotRetrieveMonitor = null;
-                correlationId = NULL_VALUE;
-                timeOfLastProgressMs = nowMs;
-
-                if (++snapshotCursor >= snapshotsToRetrieve.size())
-                {
-                    state(LIVE_LOG_REPLAY, nowMs);
-                    workCount++;
-                }
-            }
-        }
-        else if (NULL_VALUE == correlationId)
-        {
-            final long replayId = ctx.aeron().nextCorrelationId();
-            final RecordingLog.Snapshot snapshot = snapshotsToRetrieve.get(snapshotCursor);
-            final String transferChannel = "aeron:udp?endpoint=" + ctx.transferEndpoint();
-
-            if (clusterArchive.archiveProxy().replay(
-                snapshot.recordingId,
-                0,
-                NULL_LENGTH,
-                transferChannel,
-                ctx.replayStreamId(),
-                replayId,
-                clusterArchive.controlSessionId()))
-            {
-                correlationId = replayId;
-                timeOfLastProgressMs = nowMs;
-                workCount++;
-            }
-        }
-        else if (pollForResponse(clusterArchive, correlationId))
-        {
-            final int snapshotReplaySessionId = (int)clusterArchive.controlResponsePoller().relevantId();
-            final String replaySubscriptionChannel =
-                "aeron:udp?endpoint=" + ctx.transferEndpoint() + "|session-id=" + snapshotReplaySessionId;
-
-            snapshotRetrieveSubscriptionId = backupArchive.startRecording(
-                replaySubscriptionChannel, ctx.replayStreamId(), SourceLocation.REMOTE);
-
-            snapshotRetrieveMonitor = new SnapshotRetrieveMonitor(
-                snapshotReplaySessionId, ctx.aeron().countersReader(), snapshotLengthMap.get(snapshotCursor));
-
-            timeOfLastProgressMs = nowMs;
+            snapshotsToRetrieve.forEach(snapshotReplication::addSnapshot);
             workCount++;
         }
+
+        workCount += snapshotReplication.poll(TimeUnit.MILLISECONDS.toNanos(nowMs));
+        workCount += pollBackupArchiveEvents();
+        timeOfLastProgressMs = nowMs;
+
+        if (snapshotReplication.isComplete())
+        {
+            snapshotsRetrieved.addAll(snapshotReplication.snapshotsRetrieved());
+
+            snapshotReplication.close();
+            snapshotReplication = null;
+
+            state(LIVE_LOG_RECORD, nowMs);
+            workCount++;
+        }
+
+        return workCount;
+    }
+
+    private int liveLogRecord(final long nowMs)
+    {
+        int workCount = 0;
+
+        if (NULL_VALUE == liveLogRecordingSubscriptionId)
+        {
+            if (NULL_VALUE == liveLogRecordingSessionId)
+            {
+                liveLogRecordingSessionId = BitUtil.generateRandomisedId();
+            }
+
+            final String catchupEndpoint = ctx.catchupEndpoint();
+            if (catchupEndpoint.endsWith(":0"))
+            {
+                if (null == recordingSubscription)
+                {
+                    final ChannelUri channelUri = ChannelUri.parse(ctx.catchupChannel());
+                    channelUri.remove(ENDPOINT_PARAM_NAME);
+                    channelUri.put(TAGS_PARAM_NAME, aeron.nextCorrelationId() + "," + aeron.nextCorrelationId());
+                    channelUri.put(SESSION_ID_PARAM_NAME, Integer.toString(liveLogRecordingSessionId));
+                    recordingChannel = channelUri.toString();
+
+                    channelUri.put(ENDPOINT_PARAM_NAME, catchupEndpoint);
+                    recordingSubscription = aeron.addSubscription(channelUri.toString(), ctx.logStreamId());
+                    timeOfLastProgressMs = nowMs;
+                    return 1;
+                }
+                else
+                {
+                    final String resolvedEndpoint = recordingSubscription.resolvedEndpoint();
+                    if (null == resolvedEndpoint)
+                    {
+                        return 0;
+                    }
+
+                    final ChannelUri channelUri = ChannelUri.parse(ctx.catchupChannel());
+                    channelUri.put(ENDPOINT_PARAM_NAME, catchupEndpoint);
+                    channelUri.replaceEndpointWildcardPort(resolvedEndpoint);
+                    channelUri.put(SESSION_ID_PARAM_NAME, Integer.toString(liveLogRecordingSessionId));
+
+                    replayChannel = channelUri.toString();
+                }
+            }
+            else
+            {
+                final ChannelUri channelUri = ChannelUri.parse(ctx.catchupChannel());
+                channelUri.put(ENDPOINT_PARAM_NAME, catchupEndpoint);
+                channelUri.put(SESSION_ID_PARAM_NAME, Integer.toString(liveLogRecordingSessionId));
+                replayChannel = channelUri.toString();
+                recordingChannel = replayChannel;
+            }
+
+            liveLogRecordingSubscriptionId = startLogRecording();
+        }
+
+        timeOfLastProgressMs = nowMs;
+        state(LIVE_LOG_REPLAY, nowMs);
+        workCount += 1;
 
         return workCount;
     }
@@ -633,70 +823,77 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
         {
             if (null == clusterArchive)
             {
+                final int step = clusterArchiveAsyncConnect.step();
                 clusterArchive = clusterArchiveAsyncConnect.poll();
-                return null == clusterArchive ? 0 : 1;
+                return null == clusterArchive ? clusterArchiveAsyncConnect.step() - step : 1;
             }
 
             if (NULL_VALUE == correlationId)
             {
-                final long replayId = ctx.aeron().nextCorrelationId();
                 final RecordingLog.Entry logEntry = recordingLog.findLastTerm();
-                final long startPosition = null == logEntry ?
-                    leaderLogEntry.termBaseLogPosition :
-                    backupArchive.getStopPosition(logEntry.recordingId);
-
-                final String transferChannel = "aeron:udp?endpoint=" + ctx.transferEndpoint();
+                final long startPosition = replayStartPosition(logEntry);
+                final long replayId = ctx.aeron().nextCorrelationId();
 
                 if (clusterArchive.archiveProxy().boundedReplay(
-                    leaderLogRecordingId,
+                    clusterLogRecordingId,
                     startPosition,
                     NULL_LENGTH,
                     leaderCommitPositionCounterId,
-                    transferChannel,
-                    ctx.replayStreamId(),
+                    replayChannel,
+                    ctx.logStreamId(),
                     replayId,
                     clusterArchive.controlSessionId()))
                 {
+                    replayChannel = null;
                     correlationId = replayId;
                     timeOfLastProgressMs = nowMs;
                     workCount++;
                 }
             }
-            else if (NULL_VALUE != liveLogReplaySubscriptionId && NULL_COUNTER_ID == liveLogRecCounterId)
+            else if (NULL_VALUE == liveLogReplaySessionId)
+            {
+                final ControlResponsePoller poller = clusterArchive.controlResponsePoller();
+                if (0 != poller.poll() && poller.isPollComplete() &&
+                    poller.controlSessionId() == clusterArchive.controlSessionId() &&
+                    poller.correlationId() == correlationId)
+                {
+                    switch (poller.code())
+                    {
+                        case OK ->
+                        {
+                            liveLogReplaySessionId = poller.relevantId();
+                            timeOfLastProgressMs = nowMs;
+                            workCount++;
+                        }
+                        case ERROR -> throwReplayFailedException(poller);
+                        default -> throw new ClusterException("Live log replay failed: " + poller.code());
+                    }
+                }
+            }
+            else if (NULL_COUNTER_ID == liveLogRecordingCounterId)
             {
                 final CountersReader countersReader = aeron.countersReader();
 
-                if ((liveLogRecCounterId = RecordingPos.findCounterIdBySession(
-                    countersReader, liveLogReplaySessionId)) != NULL_COUNTER_ID)
+                liveLogRecordingCounterId = RecordingPos.findCounterIdBySession(
+                    countersReader, (int)liveLogReplaySessionId, backupArchive.archiveId());
+                if (NULL_COUNTER_ID != liveLogRecordingCounterId)
                 {
-                    liveLogPositionCounter.setOrdered(countersReader.getCounterValue(liveLogRecCounterId));
-
-                    liveLogRecordingId = RecordingPos.getRecordingId(countersReader, liveLogRecCounterId);
+                    liveLogPositionCounter.setRelease(countersReader.getCounterValue(liveLogRecordingCounterId));
+                    liveLogRecordingId = RecordingPos.getRecordingId(countersReader, liveLogRecordingCounterId);
                     timeOfLastBackupQueryMs = nowMs;
                     timeOfLastProgressMs = nowMs;
-
                     state(UPDATE_RECORDING_LOG, nowMs);
-                }
-            }
-            else if (pollForResponse(clusterArchive, correlationId))
-            {
-                final RecordingLog.Entry logEntry = recordingLog.findLastTerm();
-                liveLogReplayId = clusterArchive.controlResponsePoller().relevantId();
-                liveLogReplaySessionId = (int)liveLogReplayId;
-                final String replaySubscriptionChannel =
-                    "aeron:udp?endpoint=" + ctx.transferEndpoint() + "|session-id=" + liveLogReplaySessionId;
-
-                timeOfLastProgressMs = nowMs;
-
-                if (null == logEntry)
-                {
-                    liveLogReplaySubscriptionId = backupArchive.startRecording(
-                        replaySubscriptionChannel, ctx.replayStreamId(), SourceLocation.REMOTE);
+                    workCount++;
                 }
                 else
                 {
-                    liveLogReplaySubscriptionId = backupArchive.extendRecording(
-                        logEntry.recordingId, replaySubscriptionChannel, ctx.replayStreamId(), SourceLocation.REMOTE);
+                    final ControlResponsePoller poller = clusterArchive.controlResponsePoller();
+                    if (0 != poller.poll() && poller.isPollComplete() &&
+                        poller.controlSessionId() == clusterArchive.controlSessionId() &&
+                        ControlResponseCode.ERROR == poller.code())
+                    {
+                        throwReplayFailedException(poller);
+                    }
                 }
             }
         }
@@ -709,66 +906,90 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
         return workCount;
     }
 
+    private void throwReplayFailedException(final ControlResponsePoller poller)
+    {
+        throw new ClusterException("Live log replay failed (replaySessionId=" + liveLogReplaySessionId + "):" +
+            " errorMessage=" + poller.errorMessage() + ", errorCode=" +
+            ArchiveException.errorCodeAsString((int)poller.relevantId()));
+    }
+
     private int updateRecordingLog(final long nowMs)
     {
         boolean wasRecordingLogUpdated = false;
-
-        if (null != leaderLogEntry && recordingLog.isUnknown(leaderLogEntry.leadershipTermId))
+        try
         {
-            recordingLog.appendTerm(
-                liveLogRecordingId,
-                leaderLogEntry.leadershipTermId,
-                leaderLogEntry.termBaseLogPosition,
-                leaderLogEntry.timestamp);
+            final long snapshotLeadershipTermId = snapshotsRetrieved.isEmpty() ?
+                NULL_VALUE : snapshotsRetrieved.get(0).leadershipTermId();
 
-            wasRecordingLogUpdated = true;
-
-            leaderLogEntry = null;
-        }
-
-        if (!snapshotsRetrieved.isEmpty())
-        {
-            for (int i = snapshotsRetrieved.size() - 1; i >= 0; i--)
+            if (null != leaderLogEntry &&
+                recordingLog.isUnknown(leaderLogEntry.leadershipTermId) &&
+                leaderLogEntry.leadershipTermId <= snapshotLeadershipTermId)
             {
-                final RecordingLog.Snapshot snapshot = snapshotsRetrieved.get(i);
+                recordingLog.appendTerm(
+                    liveLogRecordingId,
+                    leaderLogEntry.leadershipTermId,
+                    leaderLogEntry.termBaseLogPosition,
+                    leaderLogEntry.timestamp);
 
-                recordingLog.appendSnapshot(
-                    snapshot.recordingId,
-                    snapshot.leadershipTermId,
-                    snapshot.termBaseLogPosition,
-                    snapshot.logPosition,
-                    snapshot.timestamp,
-                    snapshot.serviceId);
+                wasRecordingLogUpdated = true;
+                leaderLogEntry = null;
             }
 
-            wasRecordingLogUpdated = true;
+            if (!snapshotsRetrieved.isEmpty())
+            {
+                for (int i = snapshotsRetrieved.size() - 1; i >= 0; i--)
+                {
+                    final RecordingLog.Snapshot snapshot = snapshotsRetrieved.get(i);
+
+                    recordingLog.appendSnapshot(
+                        snapshot.recordingId(),
+                        snapshot.leadershipTermId(),
+                        snapshot.termBaseLogPosition(),
+                        snapshot.logPosition(),
+                        snapshot.timestamp(),
+                        snapshot.serviceId());
+                }
+
+                wasRecordingLogUpdated = true;
+            }
+
+            if (null != leaderLastTermEntry && recordingLog.isUnknown(leaderLastTermEntry.leadershipTermId))
+            {
+                recordingLog.appendTerm(
+                    liveLogRecordingId,
+                    leaderLastTermEntry.leadershipTermId,
+                    leaderLastTermEntry.termBaseLogPosition,
+                    leaderLastTermEntry.timestamp);
+
+                wasRecordingLogUpdated = true;
+                leaderLastTermEntry = null;
+            }
+        }
+        catch (final Exception ex)
+        {
+            ctx.countedErrorHandler().onError(ex);
+            throw new AgentTerminationException("failed to update recording log");
         }
 
-        if (null != leaderLastTermEntry && recordingLog.isUnknown(leaderLastTermEntry.leadershipTermId))
+        if (wasRecordingLogUpdated)
         {
-            recordingLog.appendTerm(
-                liveLogRecordingId,
-                leaderLastTermEntry.leadershipTermId,
-                leaderLastTermEntry.termBaseLogPosition,
-                leaderLastTermEntry.timestamp);
+            recordingLog.force(2);
+            if (!snapshotsRetrieved.isEmpty())
+            {
+                ctx.snapshotRetrieveCounter().incrementRelease();
+            }
 
-            wasRecordingLogUpdated = true;
-
-            leaderLastTermEntry = null;
-        }
-
-        if (wasRecordingLogUpdated && null != eventsListener)
-        {
-            eventsListener.onUpdatedRecordingLog(recordingLog, snapshotsRetrieved);
+            if (null != eventsListener)
+            {
+                eventsListener.onUpdatedRecordingLog(recordingLog, snapshotsRetrieved);
+            }
         }
 
         snapshotsRetrieved.clear();
         snapshotsToRetrieve.clear();
-        snapshotLengthMap.clear();
 
         timeOfLastProgressMs = nowMs;
-
-        nextQueryDeadlineMsCounter.setOrdered(nowMs + backupQueryIntervalMs);
+        nextQueryDeadlineMsCounter.setRelease(nowMs + backupQueryIntervalMs);
         state(BACKING_UP, nowMs);
 
         return 1;
@@ -786,15 +1007,15 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
             workCount += 1;
         }
 
-        if (NULL_COUNTER_ID != liveLogRecCounterId)
+        if (NULL_COUNTER_ID != liveLogRecordingCounterId)
         {
-            final long liveLogPosition = aeron.countersReader().getCounterValue(liveLogRecCounterId);
+            final long liveLogPosition = aeron.countersReader().getCounterValue(liveLogRecordingCounterId);
 
-            if (liveLogPositionCounter.proposeMaxOrdered(liveLogPosition))
+            if (liveLogPositionCounter.proposeMaxRelease(liveLogPosition))
             {
                 if (null != eventsListener)
                 {
-                    eventsListener.onLiveLogProgress(liveLogRecordingId, liveLogRecCounterId, liveLogPosition);
+                    eventsListener.onLiveLogProgress(liveLogRecordingId, liveLogRecordingCounterId, liveLogPosition);
                 }
 
                 workCount += 1;
@@ -806,95 +1027,151 @@ public class ClusterBackupAgent implements Agent, UnavailableCounterHandler
 
     private void state(final ClusterBackup.State newState, final long nowMs)
     {
-        stateChange(state, newState, nowMs);
+        logStateChange(state, newState, nowMs);
 
         if (BACKUP_QUERY == newState && null != eventsListener)
         {
             eventsListener.onBackupQuery();
         }
 
-        stateCounter.setOrdered(newState.code());
-        state = newState;
-    }
-
-    @SuppressWarnings("unused")
-    private void stateChange(final ClusterBackup.State oldState, final ClusterBackup.State newState, final long nowMs)
-    {
-        //System.out.println(nowMs + ": " + oldState + " -> " + newState);
-    }
-
-    private static boolean pollForResponse(final AeronArchive archive, final long correlationId)
-    {
-        final ControlResponsePoller poller = archive.controlResponsePoller();
-
-        if (poller.poll() > 0 && poller.isPollComplete())
+        if (!stateCounter.isClosed())
         {
-            if (poller.controlSessionId() == archive.controlSessionId() && poller.correlationId() == correlationId)
-            {
-                if (poller.code() == ControlResponseCode.ERROR)
-                {
-                    throw new ClusterException(
-                        "archive response for correlationId=" + correlationId + ", error: " + poller.errorMessage());
-                }
+            stateCounter.setRelease(newState.code());
+        }
 
-                return true;
+        state = newState;
+        correlationId = NULL_VALUE;
+    }
+
+    private void logStateChange(
+        final ClusterBackup.State oldState, final ClusterBackup.State newState, final long nowMs)
+    {
+        ClusterTracing.traceClusterBackupStateChange(oldState, newState);
+    }
+
+    private int pollBackupArchiveEvents()
+    {
+        int workCount = 0;
+
+        if (null != backupArchive)
+        {
+            final RecordingSignalPoller poller = this.recordingSignalPoller;
+            workCount += poller.poll();
+
+            if (poller.isPollComplete())
+            {
+                final int templateId = poller.templateId();
+
+                if (ControlResponseDecoder.TEMPLATE_ID == templateId && poller.code() == ControlResponseCode.ERROR)
+                {
+                    final ArchiveException ex = new ArchiveException(
+                        poller.errorMessage(), (int)poller.relevantId(), poller.correlationId());
+
+                    if (ex.errorCode() == ArchiveException.STORAGE_SPACE)
+                    {
+                        ctx.countedErrorHandler().onError(ex);
+                        throw new AgentTerminationException();
+                    }
+                    else
+                    {
+                        throw ex;
+                    }
+                }
+                else if (RecordingSignalEventDecoder.TEMPLATE_ID == templateId && null != snapshotReplication)
+                {
+                    snapshotReplication.onSignal(
+                        poller.correlationId(),
+                        poller.recordingId(),
+                        poller.recordingPosition(),
+                        poller.recordingSignal());
+                }
+            }
+            else if (0 == workCount && !poller.subscription().isConnected())
+            {
+                ctx.countedErrorHandler().onError(new ClusterEvent("local archive not connected"));
+                throw new AgentTerminationException();
             }
         }
 
-        return false;
+        return workCount;
+    }
+
+    private long startLogRecording()
+    {
+        final RecordingLog.Entry logEntry = recordingLog.findLastTerm();
+        final int streamId = ctx.logStreamId();
+        final long recordingSubscriptionId = null == logEntry ?
+            backupArchive.startRecording(recordingChannel, streamId, REMOTE, true) :
+            backupArchive.extendRecording(logEntry.recordingId, recordingChannel, streamId, REMOTE, true);
+
+        CloseHelper.close(ctx.countedErrorHandler(), recordingSubscription);
+        recordingChannel = null;
+        recordingSubscription = null;
+
+        return recordingSubscriptionId;
     }
 
     private boolean hasProgressStalled(final long nowMs)
     {
-        return (NULL_COUNTER_ID == liveLogRecCounterId) && (nowMs > (timeOfLastProgressMs + backupProgressTimeoutMs));
+        return (NULL_COUNTER_ID == liveLogRecordingCounterId) &&
+            (nowMs > (timeOfLastProgressMs + backupProgressTimeoutMs));
     }
 
-    static class SnapshotRetrieveMonitor
+    private long replayStartPosition(final RecordingLog.Entry lastTerm)
     {
-        private final long endPosition;
-        private final int sessionId;
-        private final CountersReader countersReader;
+        return replayStartPosition(lastTerm, snapshotsRetrieved, ctx.initialReplayStart(), backupArchive);
+    }
 
-        private long lastRecordingPosition = 0;
-        private long recordingId = RecordingPos.NULL_RECORDING_ID;
-        private long recordingPosition = NULL_POSITION;
-        private int counterId;
-
-        SnapshotRetrieveMonitor(final int sessionId, final CountersReader countersReader, final long endPosition)
+    static long replayStartPosition(
+        final RecordingLog.Entry lastTerm,
+        final List<RecordingLog.Snapshot> snapshotsRetrieved,
+        final ClusterBackup.Configuration.ReplayStart replayStart,
+        final AeronArchive backupArchive)
+    {
+        if (null != lastTerm)
         {
-            this.endPosition = endPosition;
-            this.countersReader = countersReader;
-            this.counterId = RecordingPos.findCounterIdBySession(countersReader, sessionId);
-            this.sessionId = sessionId;
+            return backupArchive.getStopPosition(lastTerm.recordingId);
         }
 
-        boolean isDone()
+        if (ClusterBackup.Configuration.ReplayStart.BEGINNING == replayStart)
         {
-            return endPosition <= recordingPosition;
+            return NULL_POSITION;
         }
 
-        boolean hasRecordingProgressed()
+        long replayStartPosition = NULL_POSITION;
+        for (final RecordingLog.Snapshot snapshot : snapshotsRetrieved)
         {
-            final boolean result;
-
-            if (NULL_COUNTER_ID == counterId)
+            if (ConsensusModule.Configuration.SERVICE_ID == snapshot.serviceId())
             {
-                counterId = RecordingPos.findCounterIdBySession(countersReader, sessionId);
-                result = NULL_COUNTER_ID != counterId;
+                if (replayStartPosition < snapshot.logPosition())
+                {
+                    replayStartPosition = snapshot.logPosition();
+                }
             }
-            else if (RecordingPos.NULL_RECORDING_ID == recordingId)
-            {
-                recordingId = RecordingPos.getRecordingId(countersReader, counterId);
-                result = RecordingPos.NULL_RECORDING_ID != recordingId;
-            }
-            else
-            {
-                recordingPosition = countersReader.getCounterValue(counterId);
-                result = recordingPosition > lastRecordingPosition;
-                lastRecordingPosition = recordingPosition;
-            }
-
-            return result;
         }
+
+        return replayStartPosition;
+    }
+
+    private void runTerminationHooks(final AgentTerminationException ex)
+    {
+        try
+        {
+            ctx.extendedTerminationHook().run(ex);
+        }
+        catch (final Exception e)
+        {
+            ctx.countedErrorHandler().onError(e);
+        }
+        try
+        {
+            ctx.terminationHook().run();
+        }
+        catch (final Exception e)
+        {
+            ctx.countedErrorHandler().onError(e);
+        }
+
+        throw ex;
     }
 }

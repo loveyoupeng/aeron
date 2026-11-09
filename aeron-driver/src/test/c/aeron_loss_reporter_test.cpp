@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@ public:
         const char *source,
         int32_t source_length)
     {
-        LossReporterTest *t = (LossReporterTest *)clientd;
+        auto *t = (LossReporterTest *)clientd;
 
         t->m_on_loss_entry(
             observation_count,
@@ -69,10 +69,10 @@ public:
     }
 
 protected:
-    buffer_t m_buffer;
-    uint8_t *m_ptr;
-    aeron_loss_reporter_t m_reporter;
-    std::function<void(int64_t,int64_t,int64_t,int64_t,int32_t,int32_t,const char *,int32_t,const char *,int32_t)>
+    buffer_t m_buffer = {};
+    uint8_t *m_ptr = nullptr;
+    aeron_loss_reporter_t m_reporter = {};
+    std::function<void(int64_t, int64_t, int64_t, int64_t, int32_t, int32_t, const char *, int32_t, const char *, int32_t)>
         m_on_loss_entry;
 };
 
@@ -85,21 +85,20 @@ TEST_F(LossReporterTest, shouldCreateEntry)
     const char *channel = "aeron:udp://stuff";
     const char *source = "127.0.0.1:8888";
 
-    aeron_loss_reporter_entry_offset_t offset =
-        aeron_loss_reporter_create_entry(
-            &m_reporter,
-            initial_bytes_lost,
-            timestamp_ms,
-            SESSION_ID,
-            STREAM_ID,
-            channel,
-            strlen(channel),
-            source,
-            strlen(source));
+    aeron_loss_reporter_entry_offset_t offset = aeron_loss_reporter_create_entry(
+        &m_reporter,
+        initial_bytes_lost,
+        timestamp_ms,
+        SESSION_ID,
+        STREAM_ID,
+        channel,
+        strlen(channel),
+        source,
+        strlen(source));
 
     EXPECT_EQ(offset, 0);
 
-    aeron_loss_reporter_entry_t *entry = (aeron_loss_reporter_entry_t *)m_ptr;
+    auto *entry = (aeron_loss_reporter_entry_t *)m_ptr;
     EXPECT_EQ(entry->observation_count, 1);
     EXPECT_EQ(entry->total_bytes_lost, initial_bytes_lost);
     EXPECT_EQ(entry->first_observation_timestamp, timestamp_ms);
@@ -111,8 +110,10 @@ TEST_F(LossReporterTest, shouldCreateEntry)
     EXPECT_EQ(*(int32_t *)(channel_ptr), (int32_t)strlen(channel));
     EXPECT_EQ(std::string(channel_ptr + sizeof(int32_t), strlen(channel)), std::string(channel));
 
-    const char *source_ptr =
-        (const char *)(m_ptr + sizeof(aeron_loss_reporter_entry_t) + sizeof(int32_t) + strlen(channel));
+    const char *source_ptr = (const char *)(
+        m_ptr +
+            sizeof(aeron_loss_reporter_entry_t) +
+            AERON_ALIGN((sizeof(int32_t) + strlen(channel)), sizeof(int32_t)));
     EXPECT_EQ(*(int32_t *)(source_ptr), (int32_t)strlen(source));
     EXPECT_EQ(std::string(source_ptr + sizeof(int32_t), strlen(source)), std::string(source));
 }
@@ -144,7 +145,7 @@ TEST_F(LossReporterTest, shouldUpdateEntry)
 
     aeron_loss_reporter_record_observation(&m_reporter, offset, additional_bytes_lost, latest_timestamp);
 
-    aeron_loss_reporter_entry_t *entry = (aeron_loss_reporter_entry_t *)m_ptr;
+    auto *entry = (aeron_loss_reporter_entry_t *)m_ptr;
     EXPECT_EQ(entry->observation_count, 2);
     EXPECT_EQ(entry->total_bytes_lost, initial_bytes_lost + additional_bytes_lost);
     EXPECT_EQ(entry->last_observation_timestamp, latest_timestamp);
@@ -153,20 +154,20 @@ TEST_F(LossReporterTest, shouldUpdateEntry)
 TEST_F(LossReporterTest, shouldReadNoEntriesInEmptyReport)
 {
     size_t called = 0;
-    m_on_loss_entry = [&](
-        int64_t observation_count,
-        int64_t total_bytes_lost,
-        int64_t first_observation_timestamp,
-        int64_t last_observation_timestamp,
-        int32_t session_id,
-        int32_t stream_id,
-        const char *channel,
-        int32_t channel_length,
-        const char *source,
-        int32_t source_length)
-    {
-        called++;
-    };
+    m_on_loss_entry =
+        [&](int64_t observation_count,
+            int64_t total_bytes_lost,
+            int64_t first_observation_timestamp,
+            int64_t last_observation_timestamp,
+            int32_t session_id,
+            int32_t stream_id,
+            const char *channel,
+            int32_t channel_length,
+            const char *source,
+            int32_t source_length)
+        {
+            called++;
+        };
 
     EXPECT_EQ(aeron_loss_reporter_read(m_ptr, CAPACITY, LossReporterTest::on_loss_entry, this), 0u);
     EXPECT_EQ(called, 0u);
@@ -195,28 +196,28 @@ TEST_F(LossReporterTest, shouldReadOneEntry)
     EXPECT_EQ(offset, 0);
 
     size_t called = 0;
-    m_on_loss_entry = [&](
-        int64_t observation_count,
-        int64_t total_bytes_lost,
-        int64_t first_observation_timestamp,
-        int64_t last_observation_timestamp,
-        int32_t session_id,
-        int32_t stream_id,
-        const char *read_channel,
-        int32_t channel_length,
-        const char *read_source,
-        int32_t source_length)
-    {
-        EXPECT_EQ(observation_count, 1);
-        EXPECT_EQ(total_bytes_lost, initial_bytes_lost);
-        EXPECT_EQ(first_observation_timestamp, timestamp_ms);
-        EXPECT_EQ(last_observation_timestamp, timestamp_ms);
-        EXPECT_EQ(session_id, SESSION_ID);
-        EXPECT_EQ(stream_id, STREAM_ID);
-        EXPECT_EQ(std::string(read_channel, channel_length), std::string(channel));
-        EXPECT_EQ(std::string(read_source, source_length), std::string(source));
-        called++;
-    };
+    m_on_loss_entry =
+        [&](int64_t observation_count,
+            int64_t total_bytes_lost,
+            int64_t first_observation_timestamp,
+            int64_t last_observation_timestamp,
+            int32_t session_id,
+            int32_t stream_id,
+            const char *read_channel,
+            int32_t channel_length,
+            const char *read_source,
+            int32_t source_length)
+        {
+            EXPECT_EQ(observation_count, 1);
+            EXPECT_EQ(total_bytes_lost, initial_bytes_lost);
+            EXPECT_EQ(first_observation_timestamp, timestamp_ms);
+            EXPECT_EQ(last_observation_timestamp, timestamp_ms);
+            EXPECT_EQ(session_id, SESSION_ID);
+            EXPECT_EQ(stream_id, STREAM_ID);
+            EXPECT_EQ(std::string(read_channel, channel_length), std::string(channel));
+            EXPECT_EQ(std::string(read_source, source_length), std::string(source));
+            called++;
+        };
 
     EXPECT_EQ(aeron_loss_reporter_read(m_ptr, CAPACITY, LossReporterTest::on_loss_entry, this), 1u);
     EXPECT_EQ(called, 1u);
@@ -266,44 +267,96 @@ TEST_F(LossReporterTest, shouldReadTwoEntries)
     EXPECT_GT(offset_2, 0);
 
     size_t called = 0;
-    m_on_loss_entry = [&](
-        int64_t observation_count,
-        int64_t total_bytes_lost,
-        int64_t first_observation_timestamp,
-        int64_t last_observation_timestamp,
-        int32_t session_id,
-        int32_t stream_id,
-        const char *read_channel,
-        int32_t channel_length,
-        const char *read_source,
-        int32_t source_length)
-    {
-        called++;
+    m_on_loss_entry =
+        [&](
+            int64_t observation_count,
+            int64_t total_bytes_lost,
+            int64_t first_observation_timestamp,
+            int64_t last_observation_timestamp,
+            int32_t session_id,
+            int32_t stream_id,
+            const char *read_channel,
+            int32_t channel_length,
+            const char *read_source,
+            int32_t source_length)
+        {
+            called++;
 
-        if (1 == called)
-        {
-            EXPECT_EQ(observation_count, 1);
-            EXPECT_EQ(total_bytes_lost, initial_bytes_lost_1);
-            EXPECT_EQ(first_observation_timestamp, timestamp_ms_1);
-            EXPECT_EQ(last_observation_timestamp, timestamp_ms_1);
-            EXPECT_EQ(session_id, session_id_1);
-            EXPECT_EQ(stream_id, stream_id_1);
-            EXPECT_EQ(std::string(read_channel, channel_length), std::string(channel_1));
-            EXPECT_EQ(std::string(read_source, source_length), std::string(source_1));
-        }
-        else if (2 == called)
-        {
-            EXPECT_EQ(observation_count, 1);
-            EXPECT_EQ(total_bytes_lost, initial_bytes_lost_2);
-            EXPECT_EQ(first_observation_timestamp, timestamp_ms_2);
-            EXPECT_EQ(last_observation_timestamp, timestamp_ms_2);
-            EXPECT_EQ(session_id, session_id_2);
-            EXPECT_EQ(stream_id, stream_id_2);
-            EXPECT_EQ(std::string(read_channel, channel_length), std::string(channel_2));
-            EXPECT_EQ(std::string(read_source, source_length), std::string(source_2));
-        }
-    };
+            if (1 == called)
+            {
+                EXPECT_EQ(observation_count, 1);
+                EXPECT_EQ(total_bytes_lost, initial_bytes_lost_1);
+                EXPECT_EQ(first_observation_timestamp, timestamp_ms_1);
+                EXPECT_EQ(last_observation_timestamp, timestamp_ms_1);
+                EXPECT_EQ(session_id, session_id_1);
+                EXPECT_EQ(stream_id, stream_id_1);
+                EXPECT_EQ(std::string(read_channel, channel_length), std::string(channel_1));
+                EXPECT_EQ(std::string(read_source, source_length), std::string(source_1));
+            }
+            else if (2 == called)
+            {
+                EXPECT_EQ(observation_count, 1);
+                EXPECT_EQ(total_bytes_lost, initial_bytes_lost_2);
+                EXPECT_EQ(first_observation_timestamp, timestamp_ms_2);
+                EXPECT_EQ(last_observation_timestamp, timestamp_ms_2);
+                EXPECT_EQ(session_id, session_id_2);
+                EXPECT_EQ(stream_id, stream_id_2);
+                EXPECT_EQ(std::string(read_channel, channel_length), std::string(channel_2));
+                EXPECT_EQ(std::string(read_source, source_length), std::string(source_2));
+            }
+        };
 
     EXPECT_EQ(aeron_loss_reporter_read(m_ptr, CAPACITY, LossReporterTest::on_loss_entry, this), 2u);
     EXPECT_EQ(called, 2u);
+}
+
+TEST_F(LossReporterTest, shouldReadEntriesWhenChannelPaddingCrossesEntryAlignment)
+{
+    ASSERT_EQ(aeron_loss_reporter_init(&m_reporter, m_ptr, CAPACITY), 0);
+
+    // with a 5 byte channel the 4 byte alignment of the channel adds 3 bytes, which takes the first entry from
+    // 62 to 65 bytes, past the 64 byte entry alignment
+    const char *channels[] = { "aeron", "aeron:udp?endpoint=localhost:20121", "aeron" };
+    const char *source = "127.0.0.1";
+
+    for (int i = 0; i < 3; i++)
+    {
+        ASSERT_GE(aeron_loss_reporter_create_entry(
+            &m_reporter,
+            100 * (i + 1),
+            i,
+            SESSION_ID + i,
+            STREAM_ID + i,
+            channels[i],
+            strlen(channels[i]),
+            source,
+            strlen(source)), 0);
+    }
+
+    size_t called = 0;
+    m_on_loss_entry =
+        [&](
+            int64_t observation_count,
+            int64_t total_bytes_lost,
+            int64_t first_observation_timestamp,
+            int64_t last_observation_timestamp,
+            int32_t session_id,
+            int32_t stream_id,
+            const char *read_channel,
+            int32_t channel_length,
+            const char *read_source,
+            int32_t source_length)
+        {
+            ASSERT_LT(called, 3u);
+            EXPECT_EQ(observation_count, 1);
+            EXPECT_EQ(total_bytes_lost, 100 * (int64_t)(called + 1));
+            EXPECT_EQ(session_id, SESSION_ID + (int32_t)called);
+            EXPECT_EQ(stream_id, STREAM_ID + (int32_t)called);
+            EXPECT_EQ(std::string(read_channel, (size_t)channel_length), channels[called]);
+            EXPECT_EQ(std::string(read_source, (size_t)source_length), source);
+            called++;
+        };
+
+    EXPECT_EQ(aeron_loss_reporter_read(m_ptr, CAPACITY, LossReporterTest::on_loss_entry, this), 3u);
+    EXPECT_EQ(called, 3u);
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,9 @@
 package io.aeron.samples.raw;
 
 import org.HdrHistogram.Histogram;
-import org.agrona.concurrent.SigInt;
+import org.agrona.SystemUtil;
+import org.agrona.concurrent.HighResolutionTimer;
+import org.agrona.concurrent.ShutdownSignalBarrier;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -38,6 +40,13 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public class WriteReceiveUdpPing
 {
+    /**
+     * Main method for launching the process.
+     *
+     * @param args passed to the process.
+     * @throws IOException if an error occurs with the channel.
+     */
+    @SuppressWarnings("try")
     public static void main(final String[] args) throws IOException
     {
         int numChannels = 1;
@@ -46,8 +55,12 @@ public class WriteReceiveUdpPing
             numChannels = Integer.parseInt(args[0]);
         }
 
-        final Histogram histogram = new Histogram(TimeUnit.SECONDS.toNanos(10), 3);
+        if (SystemUtil.isWindows())
+        {
+            HighResolutionTimer.enable();
+        }
 
+        final Histogram histogram = new Histogram(TimeUnit.SECONDS.toNanos(10), 3);
         final ByteBuffer buffer = ByteBuffer.allocateDirect(MTU_LENGTH_DEFAULT);
 
         final DatagramChannel[] receiveChannels = new DatagramChannel[numChannels];
@@ -63,15 +76,16 @@ public class WriteReceiveUdpPing
         init(writeChannel, writeAddress);
 
         final AtomicBoolean running = new AtomicBoolean(true);
-        SigInt.register(() -> running.set(false));
-
-        while (running.get())
+        try (ShutdownSignalBarrier ignore = new ShutdownSignalBarrier(() -> running.set(false)))
         {
-            measureRoundTrip(histogram, buffer, receiveChannels, writeChannel, running);
+            while (running.get())
+            {
+                measureRoundTrip(histogram, buffer, receiveChannels, writeChannel, running);
 
-            histogram.reset();
-            System.gc();
-            LockSupport.parkNanos(1000_000_000);
+                histogram.reset();
+                System.gc();
+                LockSupport.parkNanos(1_000_000_000L);
+            }
         }
     }
 
@@ -98,6 +112,7 @@ public class WriteReceiveUdpPing
             boolean available = false;
             while (!available)
             {
+                Thread.onSpinWait();
                 if (!running.get())
                 {
                     return;
@@ -116,7 +131,7 @@ public class WriteReceiveUdpPing
             final long receivedSequenceNumber = buffer.getLong(0);
             if (receivedSequenceNumber != sequenceNumber)
             {
-                throw new IllegalStateException("Data Loss:" + sequenceNumber + " to " + receivedSequenceNumber);
+                throw new IllegalStateException("Data Loss: " + sequenceNumber + " to " + receivedSequenceNumber);
             }
 
             final long durationNs = System.nanoTime() - buffer.getLong(SIZE_OF_LONG);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,22 @@ import org.agrona.DirectBuffer;
 
 import java.io.File;
 
+/**
+ * Default implementation of {@link TerminationValidator} that always allows termination.
+ */
 public class DefaultAllowTerminationValidator implements TerminationValidator
 {
+    /**
+     * Default constructor.
+     */
+    public DefaultAllowTerminationValidator()
+    {
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
     public boolean allowTermination(
         final File aeronDir, final DirectBuffer tokenBuffer, final int tokenOffset, final int tokenLength)
     {

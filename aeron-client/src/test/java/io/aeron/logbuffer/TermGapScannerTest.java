@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,18 +15,18 @@
  */
 package io.aeron.logbuffer;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import io.aeron.protocol.DataHeaderFlyweight;
 import org.agrona.concurrent.UnsafeBuffer;
 
 import static io.aeron.logbuffer.FrameDescriptor.FRAME_ALIGNMENT;
 import static org.agrona.BitUtil.align;
-import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 
-public class TermGapScannerTest
+class TermGapScannerTest
 {
     private static final int LOG_BUFFER_CAPACITY = LogBufferDescriptor.TERM_MIN_LENGTH;
     private static final int TERM_ID = 1;
@@ -35,27 +35,28 @@ public class TermGapScannerTest
     private final UnsafeBuffer termBuffer = mock(UnsafeBuffer.class);
     private final TermGapScanner.GapHandler gapHandler = mock(TermGapScanner.GapHandler.class);
 
-    @Before
-    public void setUp()
+    @BeforeEach
+    void setUp()
     {
         when(termBuffer.capacity()).thenReturn(LOG_BUFFER_CAPACITY);
     }
 
     @Test
-    public void shouldReportGapAtBeginningOfBuffer()
+    void shouldReportGapAtBeginningOfBuffer()
     {
         final int frameOffset = align(HEADER_LENGTH * 3, FRAME_ALIGNMENT);
         final int highWaterMark = frameOffset + align(HEADER_LENGTH, FRAME_ALIGNMENT);
 
         when(termBuffer.getIntVolatile(frameOffset)).thenReturn(HEADER_LENGTH);
 
-        assertThat(TermGapScanner.scanForGap(termBuffer, TERM_ID, 0, highWaterMark, gapHandler), is(0));
+        assertEquals(0, TermGapScanner.scanForGap(termBuffer, TERM_ID, 0, highWaterMark, gapHandler));
 
         verify(gapHandler).onGap(TERM_ID, 0, frameOffset);
+        verifyNoMoreInteractions(gapHandler);
     }
 
     @Test
-    public void shouldReportSingleGapWhenBufferNotFull()
+    void shouldReportSingleGapWhenBufferNotFull()
     {
         final int tail = align(HEADER_LENGTH, FRAME_ALIGNMENT);
         final int highWaterMark = FRAME_ALIGNMENT * 3;
@@ -65,13 +66,14 @@ public class TermGapScannerTest
         when(termBuffer.getIntVolatile(highWaterMark - align(HEADER_LENGTH, FRAME_ALIGNMENT)))
             .thenReturn(HEADER_LENGTH);
 
-        assertThat(TermGapScanner.scanForGap(termBuffer, TERM_ID, tail, highWaterMark, gapHandler), is(tail));
+        assertEquals(tail, TermGapScanner.scanForGap(termBuffer, TERM_ID, tail, highWaterMark, gapHandler));
 
         verify(gapHandler).onGap(TERM_ID, tail, align(HEADER_LENGTH, FRAME_ALIGNMENT));
+        verifyNoMoreInteractions(gapHandler);
     }
 
     @Test
-    public void shouldReportSingleGapWhenBufferIsFull()
+    void shouldReportSingleGapWhenBufferIsFull()
     {
         final int tail = LOG_BUFFER_CAPACITY - (align(HEADER_LENGTH, FRAME_ALIGNMENT) * 2);
         final int highWaterMark = LOG_BUFFER_CAPACITY;
@@ -81,13 +83,14 @@ public class TermGapScannerTest
         when(termBuffer.getIntVolatile(highWaterMark - align(HEADER_LENGTH, FRAME_ALIGNMENT)))
             .thenReturn(HEADER_LENGTH);
 
-        assertThat(TermGapScanner.scanForGap(termBuffer, TERM_ID, tail, highWaterMark, gapHandler), is(tail));
+        assertEquals(tail, TermGapScanner.scanForGap(termBuffer, TERM_ID, tail, highWaterMark, gapHandler));
 
         verify(gapHandler).onGap(TERM_ID, tail, align(HEADER_LENGTH, FRAME_ALIGNMENT));
+        verifyNoMoreInteractions(gapHandler);
     }
 
     @Test
-    public void shouldReportNoGapWhenHwmIsInPadding()
+    void shouldReportNoGapWhenHwmIsInPadding()
     {
         final int paddingLength = align(HEADER_LENGTH, FRAME_ALIGNMENT) * 2;
         final int tail = LOG_BUFFER_CAPACITY - paddingLength;
@@ -96,9 +99,42 @@ public class TermGapScannerTest
         when(termBuffer.getIntVolatile(tail)).thenReturn(paddingLength);
         when(termBuffer.getIntVolatile(tail + HEADER_LENGTH)).thenReturn(0);
 
-        assertThat(TermGapScanner.scanForGap(termBuffer, TERM_ID, tail, highWaterMark, gapHandler),
-            is(LOG_BUFFER_CAPACITY));
+        assertEquals(
+            LOG_BUFFER_CAPACITY, TermGapScanner.scanForGap(termBuffer, TERM_ID, tail, highWaterMark, gapHandler));
 
         verifyNoInteractions(gapHandler);
+    }
+
+    @Test
+    void shouldReportSingleHeaderGap()
+    {
+        final int offset = 8192 + 384;
+        when(termBuffer.getIntVolatile(offset)).thenReturn(0);
+        when(termBuffer.getIntVolatile(offset + HEADER_LENGTH)).thenReturn(128);
+
+        assertEquals(
+            offset, TermGapScanner.scanForGap(termBuffer, TERM_ID, offset, LOG_BUFFER_CAPACITY, gapHandler));
+
+        verify(termBuffer).getIntVolatile(offset);
+        verify(termBuffer).getIntVolatile(offset + HEADER_LENGTH);
+        verify(gapHandler).onGap(TERM_ID, offset, HEADER_LENGTH);
+        verifyNoMoreInteractions(gapHandler, termBuffer);
+    }
+
+    @Test
+    void shouldReportGapAtTheEndOfTheBuffer()
+    {
+        final int offset = LOG_BUFFER_CAPACITY - 128;
+        when(termBuffer.getIntVolatile(offset)).thenReturn(0);
+
+        assertEquals(
+            offset, TermGapScanner.scanForGap(termBuffer, TERM_ID, offset, LOG_BUFFER_CAPACITY, gapHandler));
+
+        verify(termBuffer).getIntVolatile(offset);
+        verify(termBuffer).getIntVolatile(offset + HEADER_LENGTH);
+        verify(termBuffer).getIntVolatile(offset + 2 * HEADER_LENGTH);
+        verify(termBuffer).getIntVolatile(offset + 3 * HEADER_LENGTH);
+        verify(gapHandler).onGap(TERM_ID, offset, 128);
+        verifyNoMoreInteractions(gapHandler, termBuffer);
     }
 }

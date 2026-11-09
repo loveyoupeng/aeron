@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,10 +20,9 @@ import org.agrona.concurrent.UnsafeBuffer;
 import java.nio.ByteBuffer;
 
 /**
- * Represents the collection of term and associated state buffers for the image between a publisher and subscriber
- * image for the replicated log.
+ * Represents the collection of raw metadata and associated term buffers for publication and image logs.
  */
-public interface RawLog
+public interface RawLog extends AutoCloseable
 {
     /**
      * The length of each term in bytes.
@@ -66,13 +65,6 @@ public interface RawLog
      * @return true if successful or false if it should be reattempted.
      */
     boolean free();
-
-    /**
-     * Has the {@link #free()} method been called.
-     *
-     * @return true if an attempt to free is in progress or completed.
-     */
-    boolean isInactive();
 
     /**
      * Close the resource regardless of if {@link #free()} has succeeded or not.

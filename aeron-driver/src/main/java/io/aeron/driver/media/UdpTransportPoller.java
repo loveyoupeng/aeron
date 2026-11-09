@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,34 +15,34 @@
  */
 package io.aeron.driver.media;
 
+import org.agrona.ErrorHandler;
 import org.agrona.nio.TransportPoller;
 
-import java.nio.channels.SelectionKey;
-
 /**
- * Encapsulates the polling of a number of {@link UdpChannelTransport}s using whatever means provides the lowest latency.
+ * Encapsulates the polling of a number of {@link UdpChannelTransport}s using whatever means provides the
+ * lowest latency.
  */
 public abstract class UdpTransportPoller extends TransportPoller
 {
     /**
-     * Explicit event loop processing as a poll
+     * {@link ErrorHandler} which can be used to log errors and continue.
+     */
+    protected final ErrorHandler errorHandler;
+
+    /**
+     * Construct a new {@link TransportPoller} with an {@link ErrorHandler} for logging.
+     *
+     * @param errorHandler which can be used to log errors and continue.
+     */
+    public UdpTransportPoller(final ErrorHandler errorHandler)
+    {
+        this.errorHandler = errorHandler;
+    }
+
+    /**
+     * Explicit event loop processing as a poll.
      *
      * @return the number of frames processed.
      */
     public abstract int pollTransports();
-
-    /**
-     * Register channel for read.
-     *
-     * @param transport to associate with read
-     * @return SelectionKey for registration for cancel
-     */
-    public abstract SelectionKey registerForRead(UdpChannelTransport transport);
-
-    /**
-     * Cancel previous registration.
-     *
-     * @param transport to cancel read for
-     */
-    public abstract void cancelRead(UdpChannelTransport transport);
 }

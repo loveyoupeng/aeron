@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -57,7 +57,7 @@ import static org.agrona.BitUtil.*;
  *  +---------------------------------------------------------------+
  * </pre>
  */
-public class LossReport
+public final class LossReport
 {
     /**
      * Alignment to be applied for each entry offset.
@@ -103,7 +103,7 @@ public class LossReport
     private final AtomicBuffer buffer;
 
     /**
-     * Create a loss report which wraps a buffer which is ideally memory mapped so it can
+     * Create a loss report which wraps a buffer which is ideally memory mapped, so it can
      * be read from another process.
      *
      * @param buffer to be wrapped.
@@ -137,7 +137,10 @@ public class LossReport
     {
         ReportEntry reportEntry = null;
 
-        final int requiredCapacity = CHANNEL_OFFSET + (SIZE_OF_INT * 2) + channel.length() + source.length();
+        final int requiredCapacity =
+            CHANNEL_OFFSET +
+            BitUtil.align(SIZE_OF_INT + channel.length(), SIZE_OF_INT) +
+            SIZE_OF_INT + source.length();
 
         if (requiredCapacity <= (buffer.capacity() - nextRecordOffset))
         {
@@ -150,9 +153,11 @@ public class LossReport
             buffer.putInt(offset + STREAM_ID_OFFSET, streamId);
 
             final int encodedChannelLength = buffer.putStringAscii(offset + CHANNEL_OFFSET, channel);
-            buffer.putStringAscii(offset + CHANNEL_OFFSET + encodedChannelLength, source);
 
-            buffer.putLongOrdered(offset + OBSERVATION_COUNT_OFFSET, 1);
+            buffer.putStringAscii(
+                offset + CHANNEL_OFFSET + BitUtil.align(encodedChannelLength, SIZE_OF_INT), source);
+
+            buffer.putLongRelease(offset + OBSERVATION_COUNT_OFFSET, 1);
 
             reportEntry = new ReportEntry(buffer, offset);
             nextRecordOffset += BitUtil.align(requiredCapacity, ENTRY_ALIGNMENT);
@@ -162,10 +167,22 @@ public class LossReport
     }
 
     /**
+     * {@inheritDoc}
+     */
+    @Override
+    public String toString()
+    {
+        return "LossReport{" +
+            "nextRecordOffset=" + nextRecordOffset +
+            ", buffer=" + buffer +
+            '}';
+    }
+
+    /**
      * Report entry for a specific stream. Once an entry has been created it can then be used repeatably
      * to capture the aggregate loss on a stream.
      */
-    public static class ReportEntry
+    public static final class ReportEntry
     {
         private final AtomicBuffer buffer;
         private final int offset;
@@ -184,7 +201,7 @@ public class LossReport
          */
         public void recordObservation(final long bytesLost, final long timestampMs)
         {
-            buffer.putLong(offset + LAST_OBSERVATION_OFFSET, timestampMs);
+            buffer.putLongRelease(offset + LAST_OBSERVATION_OFFSET, timestampMs);
             buffer.getAndAddLong(offset + TOTAL_BYTES_LOST_OFFSET, bytesLost);
             buffer.getAndAddLong(offset + OBSERVATION_COUNT_OFFSET, 1);
         }

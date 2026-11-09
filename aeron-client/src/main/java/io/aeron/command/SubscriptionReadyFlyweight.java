@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  *   0                   1                   2                   3
  *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
  *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
- *  |                         Correlation ID                        |
+ *  |                        Correlation ID                         |
  *  |                                                               |
  *  +---------------------------------------------------------------+
  *  |                  Channel Status Indicator ID                  |
@@ -37,20 +37,31 @@ import static org.agrona.BitUtil.SIZE_OF_LONG;
  */
 public class SubscriptionReadyFlyweight
 {
+    /**
+     * Length of the header.
+     */
+    public static final int LENGTH = SIZE_OF_LONG + SIZE_OF_INT;
     private static final int CORRELATION_ID_OFFSET = 0;
     private static final int CHANNEL_STATUS_INDICATOR_ID_OFFSET = CORRELATION_ID_OFFSET + SIZE_OF_LONG;
 
-    public static final int LENGTH = SIZE_OF_LONG + SIZE_OF_INT;
-
     private MutableDirectBuffer buffer;
     private int offset;
+
+    /**
+     * An empty flyweight, which should be wrapped over a buffer.
+     *
+     * @see #wrap(MutableDirectBuffer, int)
+     */
+    public SubscriptionReadyFlyweight()
+    {
+    }
 
     /**
      * Wrap the buffer at a given offset for updates.
      *
      * @param buffer to wrap
      * @param offset at which the message begins.
-     * @return for fluent API
+     * @return this for a fluent API.
      */
     public final SubscriptionReadyFlyweight wrap(final MutableDirectBuffer buffer, final int offset)
     {
@@ -61,9 +72,9 @@ public class SubscriptionReadyFlyweight
     }
 
     /**
-     * Get the correlation id field
+     * Get the correlation id field.
      *
-     * @return correlation id field
+     * @return correlation id field.
      */
     public long correlationId()
     {
@@ -71,10 +82,10 @@ public class SubscriptionReadyFlyweight
     }
 
     /**
-     * Set the correlation id field
+     * Set the correlation id field.
      *
-     * @param correlationId field value
-     * @return flyweight
+     * @param correlationId field value.
+     * @return this for a fluent API.
      */
     public SubscriptionReadyFlyweight correlationId(final long correlationId)
     {
@@ -94,10 +105,10 @@ public class SubscriptionReadyFlyweight
     }
 
     /**
-     * Set channel status counter id field
+     * Set channel status counter id field.
      *
-     * @param counterId field value
-     * @return flyweight
+     * @param counterId field value.
+     * @return this for a fluent API.
      */
     public SubscriptionReadyFlyweight channelStatusCounterId(final int counterId)
     {

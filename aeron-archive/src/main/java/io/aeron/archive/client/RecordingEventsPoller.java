@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2019 Real Logic Ltd.
+ * Copyright 2014-2025 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,14 +21,14 @@ import io.aeron.archive.codecs.MessageHeaderDecoder;
 import io.aeron.archive.codecs.RecordingProgressDecoder;
 import io.aeron.archive.codecs.RecordingStartedDecoder;
 import io.aeron.archive.codecs.RecordingStoppedDecoder;
-import io.aeron.logbuffer.FragmentHandler;
+import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 
 /**
  * Encapsulate the polling and decoding of recording events.
  */
-public class RecordingEventsPoller implements FragmentHandler
+public final class RecordingEventsPoller implements ControlledFragmentHandler
 {
     private final MessageHeaderDecoder messageHeaderDecoder = new MessageHeaderDecoder();
     private final RecordingStartedDecoder recordingStartedDecoder = new RecordingStartedDecoder();
@@ -37,7 +37,7 @@ public class RecordingEventsPoller implements FragmentHandler
 
     private final Subscription subscription;
     private int templateId;
-    private boolean pollComplete;
+    private boolean isPollComplete;
 
     private long recordingId;
     private long recordingStartPosition;
@@ -61,10 +61,13 @@ public class RecordingEventsPoller implements FragmentHandler
      */
     public int poll()
     {
-        templateId = Aeron.NULL_VALUE;
-        pollComplete = false;
+        if (isPollComplete)
+        {
+            isPollComplete = false;
+            templateId = Aeron.NULL_VALUE;
+        }
 
-        return subscription.poll(this, 1);
+        return subscription.controlledPoll(this, 1);
     }
 
     /**
@@ -74,7 +77,7 @@ public class RecordingEventsPoller implements FragmentHandler
      */
     public boolean isPollComplete()
     {
-        return pollComplete;
+        return isPollComplete;
     }
 
     /**
@@ -127,8 +130,18 @@ public class RecordingEventsPoller implements FragmentHandler
         return recordingStopPosition;
     }
 
-    public void onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public ControlledFragmentHandler.Action onFragment(
+        final DirectBuffer buffer, final int offset, final int length, final Header header)
     {
+        if (isPollComplete)
+        {
+            return ControlledFragmentHandler.Action.ABORT;
+        }
+
         messageHeaderDecoder.wrap(buffer, offset);
 
         final int schemaId = messageHeaderDecoder.schemaId();
@@ -151,8 +164,8 @@ public class RecordingEventsPoller implements FragmentHandler
                 recordingStartPosition = recordingStartedDecoder.startPosition();
                 recordingPosition = recordingStartPosition;
                 recordingStopPosition = Aeron.NULL_VALUE;
-                pollComplete = true;
-                break;
+                isPollComplete = true;
+                return ControlledFragmentHandler.Action.BREAK;
 
             case RecordingProgressDecoder.TEMPLATE_ID:
                 recordingProgressDecoder.wrap(
@@ -165,8 +178,8 @@ public class RecordingEventsPoller implements FragmentHandler
                 recordingStartPosition = recordingProgressDecoder.startPosition();
                 recordingPosition = recordingProgressDecoder.position();
                 recordingStopPosition = Aeron.NULL_VALUE;
-                pollComplete = true;
-                break;
+                isPollComplete = true;
+                return ControlledFragmentHandler.Action.BREAK;
 
             case RecordingStoppedDecoder.TEMPLATE_ID:
                 recordingStoppedDecoder.wrap(
@@ -179,8 +192,10 @@ public class RecordingEventsPoller implements FragmentHandler
                 recordingStartPosition = recordingStoppedDecoder.startPosition();
                 recordingStopPosition = recordingStoppedDecoder.stopPosition();
                 recordingPosition = recordingStopPosition;
-                pollComplete = true;
-                break;
+                isPollComplete = true;
+                return ControlledFragmentHandler.Action.BREAK;
         }
+
+        return ControlledFragmentHandler.Action.CONTINUE;
     }
 }
